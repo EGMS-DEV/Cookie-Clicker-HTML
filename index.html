@@ -3188,7 +3188,3029 @@ Feel free to alter this code to your liking, but please do not re-host it, do no
 <link rel="shortcut icon" href="img/favicon.ico" />
 <!--<link href="https://fonts.googleapis.com/css?family=Kavoon&subset=latin,latin-ext" rel="stylesheet" type="text/css">-->
 <link href='https://fonts.googleapis.com/css?family=Merriweather:900&subset=latin,latin-ext' rel='stylesheet' type='text/css'>
-<script>var M={};
+<script>/*
+Orteil's crappy dungeon generation library, 2013
+Unfinished and buggy, use at your own risk (please credit)
+http://orteil.dashnet.org
+
+Rough process (might or might not be what actually happens) :
+1 make a room in the middle
+2 pick one of its walls (not corners)
+3 select a free tile on the other side of that wall
+4 iteratively expand the selection in one (corridors) or two (rooms) directions, stopping when we meet a wall or when we're above the size threshold
+5 compute that selection into a room
+6 add decorations to the room (pillars, water) but only on the center tiles, as to leave free passages (sprinkle destructible decorations anywhere)
+7 take a random floor tile in the room and repeat step 4, but don't stop at the walls of this room (this creates branching) - repeat about 5 times for interesting shapes
+8 add those branches to the room
+9 carve the room into the map, and set the initially selected wall as a door - set the new room's parent to the previous room, and add it to its parent's children
+10 repeat step 2 with any free wall on the map until the amount of tiles dug is above the desired fill ratio
+
+Note : I should probably switch the rendering to canvas to allow stuff like occlusion shadows and lights
+*/
+
+if (1==1 || undefined==Math.seedrandom)
+{
+	//seeded random function, courtesy of http://davidbau.com/archives/2010/01/30/random_seeds_coded_hints_and_quintillions.html
+	(function(a,b,c,d,e,f){function k(a){var b,c=a.length,e=this,f=0,g=e.i=e.j=0,h=e.S=[];for(c||(a=[c++]);d>f;)h[f]=f++;for(f=0;d>f;f++)h[f]=h[g=j&g+a[f%c]+(b=h[f])],h[g]=b;(e.g=function(a){for(var b,c=0,f=e.i,g=e.j,h=e.S;a--;)b=h[f=j&f+1],c=c*d+h[j&(h[f]=h[g=j&g+b])+(h[g]=b)];return e.i=f,e.j=g,c})(d)}function l(a,b){var e,c=[],d=(typeof a)[0];if(b&&"o"==d)for(e in a)try{c.push(l(a[e],b-1))}catch(f){}return c.length?c:"s"==d?a:a+"\0"}function m(a,b){for(var d,c=a+"",e=0;c.length>e;)b[j&e]=j&(d^=19*b[j&e])+c.charCodeAt(e++);return o(b)}function n(c){try{return a.crypto.getRandomValues(c=new Uint8Array(d)),o(c)}catch(e){return[+new Date,a,a.navigator.plugins,a.screen,o(b)]}}function o(a){return String.fromCharCode.apply(0,a)}var g=c.pow(d,e),h=c.pow(2,f),i=2*h,j=d-1;c.seedrandom=function(a,f){var j=[],p=m(l(f?[a,o(b)]:0 in arguments?a:n(),3),j),q=new k(j);return m(o(q.S),b),c.random=function(){for(var a=q.g(e),b=g,c=0;h>a;)a=(a+c)*d,b*=d,c=q.g(1);for(;a>=i;)a/=2,b/=2,c>>>=1;return(a+c)/b},p},m(c.random(),b)})(this,[],Math,256,6,52);
+}
+
+if (1==1 || undefined==choose) {function choose(arr) {if (arr.length==0) return 0; else return arr[Math.floor(Math.random()*arr.length)];}}
+
+
+var DungeonGen=function()
+{
+	var TILE_EMPTY=0;//solid
+	var TILE_LIMIT=-100;//can't build anything here; edges of map
+	var TILE_FLOOR_EDGE=100;
+	var TILE_FLOOR_CENTER=110;
+	var TILE_DOOR=200;
+	var TILE_PILLAR=300;//not just pillars, could be any type of repetitive decoration
+	var TILE_WATER=400;
+	var TILE_WALL=500;
+	var TILE_WALL_CORNER=510;
+	var TILE_ENTRANCE=250;
+	var TILE_EXIT=260;
+	
+	var colors=[];
+	colors[TILE_EMPTY]='000';
+	colors[TILE_LIMIT]='900';
+	colors[TILE_FLOOR_EDGE]='ffc';
+	colors[TILE_FLOOR_CENTER]='ff9';
+	colors[TILE_DOOR]='f9f';
+	colors[TILE_PILLAR]='990';
+	colors[TILE_WATER]='99f';
+	colors[TILE_WALL]='960';
+	colors[TILE_WALL_CORNER]='630';
+	colors[TILE_ENTRANCE]='f9f';
+	colors[TILE_EXIT]='f9f';
+	
+	var rand=function(a,b){return Math.floor(Math.random()*(b-a+1)+a);}//return random value between a and b
+	
+	var Patterns=[];
+	this.Pattern=function(name,func)
+	{
+		this.name=name;
+		this.func=func;
+		Patterns.push(this);
+	}
+	new this.Pattern('Pillars',function(x,y,room)
+	{
+		if ((x+room.x)%2==0 && (y+room.y)%2==0 && Math.random()<0.8) return TILE_PILLAR;
+		return 0;
+	});
+	new this.Pattern('Large pillars',function(x,y,room)
+	{
+		if ((x+room.x)%3<2 && (y+room.y)%3<2 && Math.random()<0.8) return TILE_PILLAR;
+		return 0;
+	});
+	new this.Pattern('Sparse pillars',function(x,y,room)
+	{
+		if ((x+room.x)%3==0 && (y+room.y)%3==0 && Math.random()<0.8) return TILE_PILLAR;
+		return 0;
+	});
+	new this.Pattern('Lines',function(x,y,room)
+	{
+		if (room.x%2==0) if ((x+room.x)%2==0 && Math.random()<0.98) return TILE_PILLAR;
+		if (room.x%2==1) if ((y+room.y)%2==0 && Math.random()<0.98) return TILE_PILLAR;
+		return 0;
+	});
+	
+	
+	var getRandomPattern=function()
+	{return choose(Patterns);}
+	
+	var defaultGenerator=function(me)
+	{
+		me.roomSize=10;
+		me.corridorSize=5;
+		me.fillRatio=1/3;
+		me.corridorRatio=0.2;
+		me.pillarRatio=0.2;
+		me.waterRatio=0;
+		me.branching=4;
+		me.sizeVariance=0.2;
+	
+		me.fillRatio=0.1+Math.random()*0.4;
+		me.roomSize=Math.ceil(rand(5,15)*me.fillRatio*2);
+		me.corridorSize=Math.ceil(rand(1,7)*me.fillRatio*2);
+		me.corridorRatio=Math.random()*0.8+0.1;
+		me.pillarRatio=Math.random()*0.5+0.5;
+		me.waterRatio=Math.pow(Math.random(),2);
+		me.branching=Math.floor(Math.random()*6);
+		me.sizeVariance=Math.random();
+	}
+	
+	
+	this.Map=function(w,h,seed,params)
+	{
+		//create a new map
+		//leave the seed out for a random seed
+		//params is an object that contains custom parameters as defined in defaultGenerator
+		//example : MyMap=new DungeonGen.Map(30,30,MySeed,{waterRatio:0.8}); (80 percent of the rooms will contain water)
+		if (undefined!=seed) this.seed=seed; else {Math.seedrandom();this.seed=Math.random();}
+		Math.seedrandom(this.seed);
+		this.seedState=Math.random;
+		this.w=w||20;
+		this.h=h||20;
+		
+		this.roomsAreHidden=0;
+		
+		this.rooms=[];
+		this.freeWalls=[];//all walls that would be a good spot for a door
+		this.freeTiles=[];//all passable floor tiles
+		this.doors=[];
+		this.tiles=this.w*this.h;
+		this.tilesDug=0;
+		this.digs=0;//amount of digging steps
+		this.stuck=0;//how many times we ran into a problem; stop digging if we get too many of these
+		
+		this.data=[];//fill the map with 0
+		for (var x=0;x<this.w;x++)
+		{
+			this.data[x]=[];
+			for (var y=0;y<this.h;y++)
+			{
+				this.data[x][y]=[TILE_EMPTY,-1,0];//data is stored as [tile system type,room id,tile displayed type] (-1 is no room)
+				if (x==0 || y==0 || x==this.w-1 || y==this.h-1) this.data[x][y]=[TILE_LIMIT,-1,0];
+			}
+		}
+		
+		defaultGenerator(this);
+		if (params)
+		{
+			for (var i in params)
+			{
+				this[i]=params[i];
+			}
+		}
+		Math.seedrandom();
+		
+	}
+	
+	this.Map.prototype.getType=function(x,y){return this.data[x][y][0];}
+	this.Map.prototype.getRoom=function(x,y){if (this.data[x][y][1]!=-1) return this.rooms[this.data[x][y][1]]; else return -1;}
+	this.Map.prototype.getTile=function(x,y){return this.rooms[this.data[x][y][2]];}
+	
+	this.Map.prototype.isWall=function(x,y)
+	{
+		var n=0;
+		for (var i in this.freeWalls){if (this.freeWalls[i][0]==x && this.freeWalls[i][1]==y) return n; else n++;}
+		return -1;
+	}
+	this.Map.prototype.isFloor=function(x,y)
+	{
+		var n=0;
+		for (var i in this.freeTiles){if (this.freeTiles[i][0]==x && this.freeTiles[i][1]==y) return n; else n++;}
+		return -1;
+	}
+	this.Map.prototype.removeFreeTile=function(x,y)
+	{
+		this.freeTiles.splice(this.isFloor(x,y),1);
+	}
+	
+	this.Map.prototype.fill=function(what)
+	{
+		//fill with something (either a set value, or a function that takes the map, a position X and a position Y as arguments)
+		//NOTE : this also resets the rooms!
+		//example : MyMap.fill(function(m,x,y){return Math.floor((Math.random());});
+		//...will fill the map with 0s and 1s
+		var func=0;
+		if (typeof(what)=='function') func=1;
+		for (var x=0;x<this.w;x++){for (var y=0;y<this.h;y++){
+			if (func) this.data[x][y]=[what(this,x,y),-1,0]; else this.data[x][y]=[what,-1,0];
+		}}
+		this.rooms=[];
+	}
+	
+	this.Map.prototype.fillZone=function(X,Y,W,H,what)
+	{
+		//just plain fill a rectangle
+		for (var x=X;x<X+W;x++){for (var y=Y;y<Y+H;y++){
+			this.data[x][y][0]=what;
+		}}
+	}
+	
+	this.Map.prototype.getRoomTile=function(room,x,y)
+	{
+		var n=0;
+		for (var i in room.tiles) {if (room.tiles[i].x==x && room.tiles[i].y==y) return n; else n++;}
+		return -1;
+	}
+	
+	this.Map.prototype.getFloorTileInRoom=function(room)
+	{
+		var tiles=[];
+		for (var i in room.tiles) {if (room.tiles[i].type==TILE_FLOOR_EDGE || room.tiles[i].type==TILE_FLOOR_CENTER) tiles.push(room.tiles[i]);}
+		return choose(tiles);
+	}
+	
+	this.Map.prototype.canPlaceRoom=function(rx,ry,rw,rh)
+	{
+		if (rx<2 || ry<2 || rx+rw>=this.w-1 || ry+rh>=this.h-1) return false;
+		for (var x=rx;x<rx+rw;x++)
+		{
+			for (var y=ry;y<ry+rh;y++)
+			{
+				var tile=this.getType(x,y);
+				var room=this.getRoom(x,y);
+				if (tile==TILE_LIMIT) return false;
+				if (room!=-1) return false;
+			}
+		}
+		return true;
+	}
+	
+	this.Map.prototype.setRoomTile=function(room,x,y,tile)
+	{
+		//var mapTile=this.getType(x,y);
+		var oldTile=this.getRoomTile(room,x,y);
+		var oldTileType=oldTile!=-1?room.tiles[oldTile].type:-1;
+		if (oldTile!=-1 && (
+			//(tile!=TILE_FLOOR_EDGE && tile!=TILE_FLOOR_CENTER) ||// && (oldTileType!=TILE_FLOOR_EDGE && oldTileType!=TILE_FLOOR_CENTER)) ||
+			//(tile!=TILE_FLOOR_EDGE && tile!=TILE_FLOOR_CENTER && (oldTileType!=TILE_FLOOR_EDGE && oldTileType!=TILE_FLOOR_CENTER)) ||
+			(tile==TILE_WALL || tile==TILE_WALL_CORNER) ||//don't place a wall over an existing room
+			(tile==TILE_FLOOR_EDGE && oldTileType==TILE_FLOOR_CENTER)//don't place an edge floor over a center floor
+			)) {return false;}
+		else
+		{
+			if (oldTile!=-1) room.tiles.splice(oldTile,1);
+			room.tiles.push({x:x,y:y,type:tile,score:0});
+			if ((tile==TILE_FLOOR_EDGE || tile==TILE_FLOOR_CENTER) && (oldTileType!=TILE_FLOOR_EDGE && oldTileType!=TILE_FLOOR_CENTER)) room.freeTiles++;
+			else if (tile!=TILE_FLOOR_EDGE && tile!=TILE_FLOOR_CENTER && (oldTileType==TILE_FLOOR_EDGE || oldTileType==TILE_FLOOR_CENTER)) room.freeTiles--;
+			return true;
+		}
+	}
+	
+	this.Map.prototype.expandRoom=function(room,rx,ry,rw,rh)
+	{
+		var x=0;var y=0;
+		//floor
+		for (var x=rx;x<rx+rw;x++){for (var y=ry;y<ry+rh;y++){
+			this.setRoomTile(room,x,y,TILE_FLOOR_EDGE);
+		}}
+		for (var x=rx+1;x<rx+rw-1;x++){for (var y=ry+1;y<ry+rh-1;y++){
+			this.setRoomTile(room,x,y,TILE_FLOOR_CENTER);
+		}}
+		//walls
+		y=ry-1;
+		for (var x=rx;x<rx+rw;x++){
+			this.setRoomTile(room,x,y,TILE_WALL);
+		}
+		y=ry+rh;
+		for (var x=rx;x<rx+rw;x++){
+			this.setRoomTile(room,x,y,TILE_WALL);
+		}
+		x=rx-1;
+		for (var y=ry;y<ry+rh;y++){
+			this.setRoomTile(room,x,y,TILE_WALL);
+		}
+		x=rx+rw;
+		for (var y=ry;y<ry+rh;y++){
+			this.setRoomTile(room,x,y,TILE_WALL);
+		}
+		//corners
+		x=rx-1;y=ry-1;
+		this.setRoomTile(room,x,y,TILE_WALL_CORNER);
+		x=rx+rw;y=ry-1;
+		this.setRoomTile(room,x,y,TILE_WALL_CORNER);
+		x=rx-1;y=ry+rh;
+		this.setRoomTile(room,x,y,TILE_WALL_CORNER);
+		x=rx+rw;y=ry+rh;
+		this.setRoomTile(room,x,y,TILE_WALL_CORNER);
+		
+		//decoration
+		var water=Math.random()<this.waterRatio?1:0;
+		var pattern=Math.random()<this.pillarRatio?getRandomPattern():0;
+		for (var x=rx;x<rx+rw;x++){for (var y=ry;y<ry+rh;y++){
+			if (room.tiles[this.getRoomTile(room,x,y)].type==TILE_FLOOR_CENTER)
+			{
+				var tile=0;
+				if (water!=0) tile=TILE_WATER;
+				if (pattern!=0)
+				{
+					tile=pattern.func(x,y,room)||tile;
+				}
+				if (tile!=0) this.setRoomTile(room,x,y,tile);
+			}
+		}}
+	}
+	
+	this.Map.prototype.newRoom=function(x,y,w,h,parent)
+	{
+		//create a new abstract room, ready to be carved
+		var room={};
+		room.id=this.rooms.length;
+		room.w=w;//||rand(2,this.roomSize);
+		room.h=h;//||rand(2,this.roomSize);
+		room.x=x||rand(1,this.w-room.w-1);
+		room.y=y||rand(1,this.h-room.h-1);
+		room.tiles=[];
+		room.freeTiles=0;
+		room.parent=parent?parent:-1;
+		room.children=[];
+		room.gen=0;
+		room.door=0;
+		room.corridor=Math.random()<this.corridorRatio?1:0;
+		room.hidden=this.roomsAreHidden;//if 1, don't draw
+		//if (room.parent!=-1) room.corridor=!room.parent.corridor;//alternate rooms and corridors
+		
+		return room;
+	}
+	this.Map.prototype.planRoom=function(room)
+	{
+		var branches=this.branching+1;
+		var forcedExpansions=[];
+		var w=room.w;
+		var h=room.h;
+		while (w>0 && h>0)
+		{
+			if (w>0) {forcedExpansions.push(1,3);w--;}
+			if (h>0) {forcedExpansions.push(2,4);h--;}
+		}
+		
+		for (var i=0;i<branches;i++)
+		{
+			var steps=0;
+			var expansions=[];
+			if (!room.corridor)
+			{
+				expansions=[1,2,3,4];
+				steps=this.roomSize;
+			}
+			else
+			{
+				expansions=choose([[1,3],[2,4]]);
+				steps=this.corridorSize;
+			}
+			steps=Math.max(room.w+room.h,Math.ceil(steps*(1-Math.random()*this.sizeVariance)));
+			if (room.tiles.length==0) {var rx=room.x;var ry=room.y;var rw=1;var rh=1;}
+			else {var randomTile=this.getFloorTileInRoom(room);var rx=randomTile.x;var ry=randomTile.y;var rw=1;var rh=1;}
+			for (var ii=0;ii<steps;ii++)
+			{
+				if (expansions.length==0) break;
+				var xd=0;var yd=0;var wd=0;var hd=0;
+				var side=choose(expansions);
+				if (forcedExpansions.length>0) side=forcedExpansions[0];
+				if (side==1) {xd=-1;wd=1;}
+				else if (side==2) {yd=-1;hd=1;}
+				else if (side==3) {wd=1;}
+				else if (side==4) {hd=1;}
+				if (this.canPlaceRoom(rx+xd,ry+yd,rw+wd,rh+hd)) {rx+=xd;ry+=yd;rw+=wd;rh+=hd;} else expansions.splice(expansions.indexOf(side),1);
+				if (forcedExpansions.length>0) forcedExpansions.splice(0,1);
+			}
+			if (rw>1 || rh>1)
+			{
+				this.expandRoom(room,rx,ry,rw,rh);
+			}
+		}
+	}
+	
+	
+	this.Map.prototype.carve=function(room)
+	{
+		//carve a room into the map
+		for (var i in room.tiles)
+		{
+			var thisTile=room.tiles[i];
+			var x=thisTile.x;var y=thisTile.y;
+			var myType=this.data[x][y][0];
+			var type=thisTile.type;
+			
+			if ((type==TILE_WALL || type==TILE_WALL_CORNER) && this.isWall(x,y)!=-1) {this.freeWalls.splice(this.isWall(x,y),1);}
+			
+			if (this.data[x][y][1]!=-1 && (type==TILE_WALL || type==TILE_WALL_CORNER)) {}
+			else
+			{
+				if (this.data[x][y][1]==-1) this.tilesDug++;
+				this.data[x][y]=[thisTile.type,room.id,0];
+				if (x>1 && y>1 && x<this.w-2 && y<this.h-2 && type==TILE_WALL) this.freeWalls.push([x,y]);
+				if (type==TILE_FLOOR_EDGE || type==TILE_FLOOR_CENTER) this.freeTiles.push([x,y]);
+			}
+			var pos=[x,y];
+		}
+		this.rooms[room.id]=room;
+	}
+	
+	this.Map.prototype.newRandomRoom=function(params)
+	{
+		var success=1;
+		params=params||{};//params is an object such as {corridor:1}
+		var door=choose(this.freeWalls);//select a free wall to use as a door
+		if (!door) {success=0;}
+		else
+		{
+			//this.data[door[0]][door[1]][0]=TILE_LIMIT;//not door
+			var parentRoom=this.getRoom(door[0],door[1]);
+			var sides=[];//select a free side of that door
+			if (this.getType(door[0]-1,door[1])==TILE_EMPTY) sides.push([-1,0]);
+			if (this.getType(door[0]+1,door[1])==TILE_EMPTY) sides.push([1,0]);
+			if (this.getType(door[0],door[1]-1)==TILE_EMPTY) sides.push([0,-1]);
+			if (this.getType(door[0],door[1]+1)==TILE_EMPTY) sides.push([0,1]);
+			var side=choose(sides);
+			if (!side) {success=0;this.freeWalls.splice(this.isWall(door[0],door[1]),1);}
+			else
+			{
+				var room=this.newRoom(door[0]+side[0],door[1]+side[1],0,0,parentRoom);//try a new room from this spot
+				for (var i in params)
+				{
+					room[i]=params[i];
+				}
+				this.planRoom(room);
+				if (room.tiles.length>0 && room.freeTiles>0)//we got a decent room
+				{
+					this.carve(room);
+					this.data[door[0]][door[1]][0]=TILE_DOOR;//place door
+					room.door=[door[0],door[1]];
+					this.data[door[0]][door[1]][1]=room.id;//set ID
+					this.freeWalls.splice(this.isWall(door[0],door[1]),1);//the door isn't a wall anymore
+					this.doors.push([door[0],door[1],room]);
+					//remove free tiles on either side of the door
+					if (this.isFloor(door[0]+side[0],door[1]+side[1])!=-1) this.removeFreeTile(door[0]+side[0],door[1]+side[1]);
+					if (this.isFloor(door[0]-side[0],door[1]-side[1])!=-1) this.removeFreeTile(door[0]-side[0],door[1]-side[1]);
+					room.parent=parentRoom;
+					parentRoom.children.push(room);
+					room.gen=parentRoom.gen+1;
+				}
+				else//not a good spot; remove this tile from the list of walls
+				{
+					this.freeWalls.splice(this.isWall(door[0],door[1]),1);
+					success=0;
+				}
+			}
+		}
+		if (success) return room;
+		else return 0;
+	}
+	
+	this.Map.prototype.getRandomSpotInRoom=function(room)
+	{
+		var listOfTiles=[];
+		for (var i in room.tiles)
+		{
+			if ((room.tiles[i].type==TILE_FLOOR_EDGE || room.tiles[i].type==TILE_FLOOR_CENTER) && this.isFloor(room.tiles[i].x,room.tiles[i].y)!=-1)
+			{
+				listOfTiles.push(room.tiles[i]);
+			}
+		}
+		if (listOfTiles.length==0) return -1;
+		return choose(listOfTiles);
+	}
+	this.Map.prototype.getBestSpotInRoom=function(room)
+	{
+		var highest=-1;
+		var listOfHighest=[];
+		for (var i in room.tiles)
+		{
+			if ((room.tiles[i].type==TILE_FLOOR_EDGE || room.tiles[i].type==TILE_FLOOR_CENTER) && this.isFloor(room.tiles[i].x,room.tiles[i].y)!=-1)
+			{
+				if (room.tiles[i].score>highest)
+				{
+					listOfHighest=[];
+					highest=room.tiles[i].score;
+					listOfHighest.push(room.tiles[i]);
+				}
+				else if (room.tiles[i].score==highest)
+				{
+					listOfHighest.push(room.tiles[i]);
+				}
+			}
+		}
+		if (listOfHighest.length==0) return -1;
+		return choose(listOfHighest);
+	}
+	this.Map.prototype.getEarliestRoom=function()
+	{
+		return this.rooms[0];
+	}
+	this.Map.prototype.getDeepestRoom=function()
+	{
+		var deepest=0;
+		var deepestRoom=this.rooms[0];
+		for (var i in this.rooms)
+		{
+			if ((this.rooms[i].gen+Math.sqrt(this.rooms[i].freeTiles)*0.05)>=deepest && this.rooms[i].corridor==0 && this.rooms[i].freeTiles>4) {deepest=(this.rooms[i].gen+Math.sqrt(this.rooms[i].freeTiles)*0.05);deepestRoom=this.rooms[i];}
+		}
+		return deepestRoom;
+	}
+	
+	this.Map.prototype.dig=function()
+	{
+		//one step in which we try to carve new stuff
+		//returns 0 when we couldn't dig this step, 1 when we could, and 2 when the digging is complete
+		Math.random=this.seedState;
+		
+		var badDig=0;
+		
+		if (this.digs==0)//first dig : build a starting room in the middle of the map
+		{
+			var w=rand(3,7);
+			var h=rand(3,7);
+			var room=this.newRoom(Math.floor(this.w/2-w/2),Math.floor(this.h/2-h/2),w,h);
+			room.corridor=0;
+			this.planRoom(room);
+			this.carve(room);
+		}
+		else
+		{
+			if (this.newRandomRoom()==0) badDig++;
+		}
+		if (badDig>0) this.stuck++;
+		
+		this.digs++;
+		
+		var finished=0;
+		if (this.tilesDug>=this.tiles*this.fillRatio) finished=1;
+		if (this.stuck>100) finished=1;
+		
+		if (finished==1)//last touch : try to add a whole room at the end
+		{
+			for (var i=0;i<10;i++)
+			{
+				var newRoom=this.newRandomRoom({corridor:0,w:rand(3,7),h:rand(3,7)});
+				if (newRoom!=0 && newRoom.freeTiles>15) break;
+			}
+		}
+		
+		Math.seedrandom();
+		if (finished==1) return 1; else if (badDig>0) return -1; else return 0;
+	}
+	
+	this.Map.prototype.finish=function()
+	{
+		//touch up the map : add pillars in corners etc
+		/*
+		//set paths
+		for (var i in this.rooms)
+		{
+			var me=this.rooms[i];
+			if (me.door!=0)
+			{
+				var doors=[];
+				doors.push(me.door);
+				for (var ii in me.children)
+				{
+					if (me.children[ii].door!=0) doors.push(me.children[ii].door);
+				}
+				for (var ii in doors)
+				{
+					this.data[doors[ii][0]][doors[ii][1]][0]=TILE_LIMIT;
+					//ideally we should run agents that step from each door to the next
+				}
+			}
+		}
+		*/
+		for (var i in this.rooms)
+		{
+			var pillars=Math.random()<this.pillarRatio;
+			for (var ii in this.rooms[i].tiles)
+			{
+				var x=this.rooms[i].tiles[ii].x;
+				var y=this.rooms[i].tiles[ii].y;
+				var me=this.data[x][y][0];
+				var x1=this.data[x-1][y][0];
+				var x2=this.data[x+1][y][0];
+				var y1=this.data[x][y-1][0];
+				var y2=this.data[x][y+1][0];
+				var xy1=this.data[x-1][y-1][0];
+				var xy2=this.data[x+1][y-1][0];
+				var xy3=this.data[x-1][y+1][0];
+				var xy4=this.data[x+1][y+1][0];
+				
+				var walls=0;
+				if ((x1==TILE_WALL||x1==TILE_WALL_CORNER)) walls++;
+				if ((y1==TILE_WALL||y1==TILE_WALL_CORNER)) walls++;
+				if ((x2==TILE_WALL||x2==TILE_WALL_CORNER)) walls++;
+				if ((y2==TILE_WALL||y2==TILE_WALL_CORNER)) walls++;
+				if ((xy1==TILE_WALL||xy1==TILE_WALL_CORNER)) walls++;
+				if ((xy2==TILE_WALL||xy2==TILE_WALL_CORNER)) walls++;
+				if ((xy3==TILE_WALL||xy3==TILE_WALL_CORNER)) walls++;
+				if ((xy4==TILE_WALL||xy4==TILE_WALL_CORNER)) walls++;
+				
+				var floors=0;
+				if ((x1==TILE_FLOOR_CENTER||x1==TILE_FLOOR_EDGE)) floors++;
+				if ((y1==TILE_FLOOR_CENTER||y1==TILE_FLOOR_EDGE)) floors++;
+				if ((x2==TILE_FLOOR_CENTER||x2==TILE_FLOOR_EDGE)) floors++;
+				if ((y2==TILE_FLOOR_CENTER||y2==TILE_FLOOR_EDGE)) floors++;
+				if ((xy1==TILE_FLOOR_CENTER||xy1==TILE_FLOOR_EDGE)) floors++;
+				if ((xy2==TILE_FLOOR_CENTER||xy2==TILE_FLOOR_EDGE)) floors++;
+				if ((xy3==TILE_FLOOR_CENTER||xy3==TILE_FLOOR_EDGE)) floors++;
+				if ((xy4==TILE_FLOOR_CENTER||xy4==TILE_FLOOR_EDGE)) floors++;
+				
+				var complete=0;
+				if (walls+floors==8) complete=1;
+				
+				var angle=0;
+				if (complete)
+				{
+					var top=0;
+					var left=0;
+					var right=0;
+					var bottom=0;
+					if ((xy1==TILE_WALL||xy1==TILE_WALL_CORNER) && (y1==TILE_WALL||y1==TILE_WALL_CORNER) && (xy2==TILE_WALL||xy2==TILE_WALL_CORNER)) top=1;
+					else if ((xy1==TILE_FLOOR_CENTER||xy1==TILE_FLOOR_EDGE) && (y1==TILE_FLOOR_CENTER||y1==TILE_FLOOR_EDGE) && (xy2==TILE_FLOOR_CENTER||xy2==TILE_FLOOR_EDGE)) top=-1;
+					if ((xy2==TILE_WALL||xy2==TILE_WALL_CORNER) && (x2==TILE_WALL||x2==TILE_WALL_CORNER) && (xy4==TILE_WALL||xy4==TILE_WALL_CORNER)) right=1;
+					else if ((xy2==TILE_FLOOR_CENTER||xy2==TILE_FLOOR_EDGE) && (x2==TILE_FLOOR_CENTER||x2==TILE_FLOOR_EDGE) && (xy4==TILE_FLOOR_CENTER||xy4==TILE_FLOOR_EDGE)) right=-1;
+					if ((xy1==TILE_WALL||xy1==TILE_WALL_CORNER) && (x1==TILE_WALL||x1==TILE_WALL_CORNER) && (xy3==TILE_WALL||xy3==TILE_WALL_CORNER)) left=1;
+					else if ((xy1==TILE_FLOOR_CENTER||xy1==TILE_FLOOR_EDGE) && (x1==TILE_FLOOR_CENTER||x1==TILE_FLOOR_EDGE) && (xy3==TILE_FLOOR_CENTER||xy3==TILE_FLOOR_EDGE)) left=-1;
+					if ((xy3==TILE_WALL||xy3==TILE_WALL_CORNER) && (y2==TILE_WALL||y2==TILE_WALL_CORNER) && (xy4==TILE_WALL||xy4==TILE_WALL_CORNER)) bottom=1;
+					else if ((xy3==TILE_FLOOR_CENTER||xy3==TILE_FLOOR_EDGE) && (y2==TILE_FLOOR_CENTER||y2==TILE_FLOOR_EDGE) && (xy4==TILE_FLOOR_CENTER||xy4==TILE_FLOOR_EDGE)) bottom=-1;
+					if ((top==1 && bottom==-1) || (top==-1 && bottom==1) || (left==1 && right==-1) || (left==-1 && right==1)) angle=1;
+				}
+				
+				if (pillars && Math.random()<0.8 && this.rooms[i].freeTiles>4)
+				{
+					if ((angle==1 || (complete && walls==7)) && me==TILE_FLOOR_EDGE && x1!=TILE_DOOR && x2!=TILE_DOOR && y1!=TILE_DOOR && y2!=TILE_DOOR)
+					{
+						this.data[x][y][0]=TILE_PILLAR;
+						me=TILE_PILLAR;
+						this.removeFreeTile(x,y);
+						this.rooms[i].freeTiles--;
+					}
+				}
+				
+				//calculate score (for placing items and exits)
+				if (top==1 || bottom==1 || left==1 || right==1)
+				{
+					this.rooms[i].tiles[ii].score+=2;
+				}
+				if (walls>5 || floors>5)
+				{
+					this.rooms[i].tiles[ii].score+=1;
+				}
+				if (walls==7 || floors==8)
+				{
+					this.rooms[i].tiles[ii].score+=5;
+				}
+				if ((me!=TILE_FLOOR_CENTER && me!=TILE_FLOOR_EDGE) || x1==TILE_DOOR || x2==TILE_DOOR || y1==TILE_DOOR || y2==TILE_DOOR) this.rooms[i].tiles[ii].score=-1;
+				
+			}
+		}
+		
+		
+		
+		//carve entrance and exit
+		var entrance=this.getBestSpotInRoom(this.getEarliestRoom());
+		this.data[entrance.x][entrance.y][0]=TILE_ENTRANCE;
+		this.entrance=[entrance.x,entrance.y];
+		entrance.score=0;
+		this.removeFreeTile(entrance.x,entrance.y);
+		var exit=this.getBestSpotInRoom(this.getDeepestRoom());
+		this.data[exit.x][exit.y][0]=TILE_EXIT;
+		this.exit=[exit.x,exit.y];
+		this.removeFreeTile(exit.x,exit.y);
+		exit.score=0;
+		
+		/*
+		for (var i in this.doors)//remove door tiles (to add later; replace the tiles by entities that delete themselves when opened)
+		{
+			this.data[this.doors[i][0]][this.doors[i][1]][0]=TILE_FLOOR_EDGE;
+		}
+		*/
+	}
+	
+	this.Map.prototype.isObstacle=function(x,y)
+	{
+		var free=[TILE_FLOOR_EDGE,TILE_FLOOR_CENTER,TILE_DOOR,TILE_ENTRANCE,TILE_EXIT];
+		for (var i in free)
+		{
+			if (this.data[x][y][0]==free[i]) return 0;
+		}
+		return 1;
+	}
+	
+	var joinTile=function(map,x,y,joinWith)
+	{
+		//for the tile at x,y, return 2 if it joins with its horizontal neighbors, 3 if it joins with its vertical neighbors, 1 if it joins with either both or neither.
+		//joinWith contains the tile types that count as joinable, in addition to this tile. (don't add the tested tile to joinWith!)
+		var p=1;
+		var me=map.data[x][y][0];
+		var x1=map.data[x-1][y][0];
+		var x2=map.data[x+1][y][0];
+		var y1=map.data[x][y-1][0];
+		var y2=map.data[x][y+1][0];
+		joinWith.push(me);
+		var joinsX=0;
+		for (var i in joinWith)
+		{
+			if (x1==joinWith[i]) joinsX++;
+			if (x2==joinWith[i]) joinsX++;
+		}
+		var joinsY=0;
+		for (var i in joinWith)
+		{
+			if (y1==joinWith[i]) joinsY++;
+			if (y2==joinWith[i]) joinsY++;
+		}
+		if (joinsX==2 && joinsY==2) p=1;
+		else if (joinsX==2) p=2;
+		else if (joinsY==2) p=3;
+		return p;
+	}
+	this.Map.prototype.getPic=function(x,y)
+	{
+		//return a position [x,y] in the tiles (as 0, 1, 2...) for the tile on the map at position x,y
+		if (Tiles[this.data[x][y][2]])
+		{
+			if (Tiles[this.data[x][y][2]].joinType=='join')
+			{
+				var thisPic=Tiles[this.data[x][y][2]].pic;
+				thisPic=[thisPic[0],thisPic[1]];//why is this even necessary?
+				var joinWith=[];
+				if (this.data[x][y][0]==TILE_WALL) joinWith.push(TILE_WALL_CORNER);
+				else if (this.data[x][y][0]==TILE_DOOR) joinWith.push(TILE_WALL,TILE_WALL_CORNER);
+				thisPic[0]+=joinTile(this,x,y,joinWith)-1;
+				return thisPic;
+			}
+			else if (Tiles[this.data[x][y][2]].joinType=='random3')
+			{
+				var thisPic=Tiles[this.data[x][y][2]].pic;
+				thisPic=[thisPic[0],thisPic[1]];
+				thisPic[0]+=Math.floor(Math.random()*3);
+				return thisPic;
+			}
+			return Tiles[this.data[x][y][2]].pic;
+		}
+		return [0,0];
+	}
+	
+	var Tiles=[];
+	var TilesByName=[];
+	this.Tile=function(name,pic,joinType)
+	{
+		this.name=name;
+		this.pic=pic;
+		this.joinType=joinType||'none';
+		this.id=Tiles.length;
+		Tiles[this.id]=this;
+		TilesByName[this.name]=this;
+	}
+	new this.Tile('void',[0,0]);
+	this.loadTiles=function(tiles)
+	{
+		for (var i in tiles)
+		{
+			var name=tiles[i][0];
+			var pic=tiles[i][1];
+			var joinType=tiles[i][2];
+			new this.Tile(name,pic,joinType);
+		}
+	}
+	
+	var computeTile=function(tile,tiles,value,name)
+	{
+		if (tile==value && tiles[name]) return TilesByName[tiles[name]];
+		return 0;
+	}
+	this.Map.prototype.assignTiles=function(room,tiles)
+	{
+		//set the displayed tiles for this room
+		for (var i in room.tiles)
+		{
+			var type=Tiles[0];
+			var me=room.tiles[i];
+			var tile=this.data[me.x][me.y][0];
+			type=computeTile(tile,tiles,TILE_WALL_CORNER,'wall corner')||type;
+			type=computeTile(tile,tiles,TILE_WALL,'wall')||type;
+			type=computeTile(tile,tiles,TILE_FLOOR_EDGE,'floor edges')||type;
+			type=computeTile(tile,tiles,TILE_FLOOR_CENTER,'floor')||type;
+			type=computeTile(tile,tiles,TILE_PILLAR,'pillar')||type;
+			type=computeTile(tile,tiles,TILE_DOOR,'door')||type;
+			type=computeTile(tile,tiles,TILE_WATER,'water')||type;
+			type=computeTile(tile,tiles,TILE_ENTRANCE,'entrance')||type;
+			type=computeTile(tile,tiles,TILE_EXIT,'exit')||type;
+			
+			this.data[me.x][me.y][2]=type.id;
+		}
+	}
+	
+	
+	this.Map.prototype.draw=function(size)
+	{
+		//return a string containing a rough visual representation of the map
+		var str='';
+		var size=size||10;
+		for (var y=0;y<this.h;y++){for (var x=0;x<this.w;x++){
+				var text='';
+				if (this.isFloor(x,y)!=-1) text='o';
+				if (this.isWall(x,y)!=-1) text+='x';
+				var room=this.getRoom(x,y);
+				var opacity=Math.max(0.1,1-(this.getRoom(x,y).gen/10));
+				var title=room.freeTiles;//this.data[x][y][0].toString();
+				text='';
+				str+='<div style="opacity:'+opacity+';width:'+size+'px;height:'+size+'px;position:absolute;left:'+(x*size)+'px;top:'+(y*size)+'px;display:block;padding:0px;margin:0px;background:#'+colors[this.data[x][y][0]]+';color:#999;" title="'+title+'">'+text+'</div>';
+			}
+			str+='<br>';
+		}
+		str='<div style="position:relative;width:'+(this.w*size)+'px;height:'+(this.h*size)+'px;background:#000;font-family:Courier;font-size:'+size+'px;float:left;margin:10px;">'+str+'</div>';
+		return str;
+	}
+	
+	this.Map.prototype.drawDetailed=function()
+	{
+		//return a string containing a rough visual representation of the map (with graphics)
+		var str='';
+		var size=16;
+		for (var y=0;y<this.h;y++){for (var x=0;x<this.w;x++){
+				var room=this.getRoom(x,y);
+				//var opacity=Math.max(0.1,room.tiles[this.getRoomTile(room,x,y)].score);
+				var opacity=1;
+				var title='void';
+				if (room!=-1)
+				{
+					opacity=Math.max(0.1,1-room.gen/5);
+					if (this.data[x][y][0]==TILE_ENTRANCE || this.data[x][y][0]==TILE_EXIT) opacity=1;
+					title=(room.corridor?'corridor':'room')+' '+room.id+' | depth : '+room.gen+' | children : '+room.children.length;
+				}
+				var pic=this.getPic(x,y);
+				str+='<div style="opacity:'+opacity+';width:'+size+'px;height:'+size+'px;position:absolute;left:'+(x*size)+'px;top:'+(y*size)+'px;display:block;padding:0px;margin:0px;background:#'+colors[this.data[x][y][0]]+' url(img/dungeonTiles.png) '+(-pic[0]*16)+'px '+(-pic[1]*16)+'px;color:#999;" title="'+title+'"></div>';
+			}
+			str+='<br>';
+		}
+		str='<div style="box-shadow:0px 0px 12px 6px #00061b;position:relative;width:'+(this.w*size)+'px;height:'+(this.h*size)+'px;background:#00061b;font-family:Courier;font-size:'+size+'px;float:left;margin:10px;">'+str+'</div>';
+		return str;
+	}
+	
+	this.Map.prototype.getStr=function()
+	{
+		//return a string containing the map with tile graphics, ready to be pasted in a wrapper
+		var str='';
+		var size=16;
+		for (var y=0;y<this.h;y++){for (var x=0;x<this.w;x++){
+				var room=this.getRoom(x,y);
+				//var opacity=Math.max(0.1,room.tiles[this.getRoomTile(room,x,y)].score);
+				var opacity=1;
+				var title='void';
+				var pic=this.getPic(x,y);
+				if (room!=-1)
+				{
+					/*
+					opacity=Math.max(0.1,1-room.gen/5);
+					if (room.hidden) opacity=0;
+					if (this.data[x][y][0]==TILE_ENTRANCE || this.data[x][y][0]==TILE_EXIT) opacity=1;
+					*/
+					if (room.hidden) pic=[0,0];
+					title=(room.corridor?'corridor':'room')+' '+room.id+' | depth : '+room.gen+' | children : '+room.children.length;
+				}
+				str+='<div style="opacity:'+opacity+';width:'+size+'px;height:'+size+'px;position:absolute;left:'+(x*size)+'px;top:'+(y*size)+'px;display:block;padding:0px;margin:0px;background:#'+colors[this.data[x][y][0]]+' url(img/dungeonTiles.png) '+(-pic[0]*16)+'px '+(-pic[1]*16)+'px;color:#999;" title="'+title+'"></div>';
+			}
+			str+='<br>';
+		}
+		return str;
+	}
+	
+}
+</script>
+<script>
+function ajax(url,callback){
+	var ajaxRequest;
+	try{ajaxRequest = new XMLHttpRequest();} catch (e){try{ajaxRequest=new ActiveXObject('Msxml2.XMLHTTP');} catch (e) {try{ajaxRequest=new ActiveXObject('Microsoft.XMLHTTP');} catch (e){alert("Something broke!");return false;}}}
+	if (callback){ajaxRequest.onreadystatechange=function(){if(ajaxRequest.readyState==4){callback(ajaxRequest.responseText);}}}
+	ajaxRequest.open('GET',url+'&nocache='+(new Date().getTime()),true);ajaxRequest.send(null);
+}
+</script>
+<script>/*
+Orteil's sloppy Cookie Clicker dungeons
+
+Optimizations to do (not mentioning the dozens of missing features) :
+-use canvas instead
+-only compute AI for mobs with 2 tiles of view
+*/
+var LaunchDungeons=function()
+{
+	Game.GetWord=function(type)
+	{
+		if (type=='secret') return choose(['hidden','secret','mysterious','forgotten','forbidden','lost','sunk','buried','concealed','shrouded','invisible','elder']);
+		if (type=='ruined') return choose(['ancient','old','ruined','ravaged','destroyed','collapsed','demolished','burnt','torn-down','shattered','dilapidated','abandoned','crumbling','derelict','decaying']);
+		if (type=='magical') return choose(['arcane','magical','mystical','sacred','honed','banished','unholy','holy','demonic','enchanted','necromantic','bewitched','haunted','occult','astral']);
+		return '';
+	}
+	
+	/*=====================================================================================
+	DUNGEONS
+	=======================================================================================*/
+	Game.DungeonTypes=[];
+	Game.DungeonType=function(name)
+	{
+		this.name=name;
+		this.nameGenerator=function(){return 'Mysterious dungeon';};
+		this.roomTypes=[];
+		Game.DungeonTypes[this.name]=this;
+		return this;
+	};
+	
+	/*=====================================================================================
+	CREATE DUNGEON TYPES
+	=======================================================================================*/
+	new Game.DungeonType('Factory').
+	nameGenerator=function(){
+		var str='';
+		str+=Game.GetWord(choose(['secret','ruined','magical']))+' '+choose(['factory','factories','bakery','bakeries','confectionery','laboratory','research center','chocolate forge','chocolate foundry','manufactory','warehouse','machinery','works','bakeworks','workshop','assembly line']);
+		return str;
+	};
+	
+	new Game.DungeonType('Mine').
+	nameGenerator=function(){
+		var str='';
+		str+=Game.GetWord(choose(['secret','ruined','magical']))+' '+choose(['chocolate','chocolate','chocolate','white chocolate','sugar','cacao'])+' '+choose(['mine','mines','pit','pits','quarry','excavation','tunnel','shaft','lode','trench','mountain','vein','cliff','peak','dome','crater','abyss','chasm','hole','burrow']);
+		return str;
+	};
+	
+	new Game.DungeonType('Portal').
+	nameGenerator=function(){
+		var str='';
+		str+=Game.GetWord(choose(['secret','ruined','magical']))+' '+choose(['portal','gate','dimension','warpgate','door']);
+		return str;
+	};
+	
+	new Game.DungeonType('Secret zebra level').
+	nameGenerator=function(){
+		var str='';
+		str+=Game.GetWord(choose(['secret']))+' '+choose(['zebra level']);
+		return str;
+	};
+	
+	
+	/*=====================================================================================
+	CREATE TILE TYPES
+	=======================================================================================*/
+	
+	var D=new DungeonGen();
+	D.loadTiles([
+	['wall',[1,0],'join'],
+	['wall corner',[1,0]],
+	['floor',[1,1],'random3'],
+	['tiled floor',[1,2],'join'],
+	['round pillar',[1,4]],
+	['square pillar',[2,4]],
+	['potted plant',[3,4]],
+	['bookshelf',[4,5],'join'],
+	['door',[1,3],'join'],
+	['alt wall',[4,0],'join'],
+	['alt wall corner',[4,0]],
+	['alt floor',[4,1],'random3'],
+	['alt tiled floor',[4,2],'join'],
+	['alt round pillar',[4,4]],
+	['alt square pillar',[5,4]],
+	['alt potted plant',[6,4]],
+	['alt bookshelf',[4,6],'join'],
+	['alt door',[4,3],'join'],
+	['water',[1,5]],
+	['green water',[2,5]],
+	['dark water',[3,5]],
+	['wooden wall',[1,7],'join'],
+	['wooden floor',[1,6],'random3'],
+	['conveyor belt',[4,7],'join'],
+	['entrance',[0,1]],
+	['alt entrance',[0,3]],
+	['exit',[0,2]],
+	['alt exit',[0,4]]
+	]);
+	
+	
+	/*=====================================================================================
+	CREATE MONSTER TYPES
+	=======================================================================================*/
+	
+	/*
+	An explanation of stats :
+		-hp : health points
+		-speed : determines who attacks first in a fight; bypasses dodging; determines how fast heroes auto-run dungeons
+		-might : determines how much damage is done to opponents
+		-guard : lowers incoming damage
+		-dodge : chance of avoiding incoming attacks completely (affected by the opponent's speed)
+		-luck : heroes only, determines drops and rare encounters
+		-rarity : monsters only, determines how often a monster is added to the spawn table
+		-level : monsters only, determines which average room depth the monster is more likely to spawn in (also determines the loot amount)
+	*/
+	Game.monsterIconY=10;//offset for dungeonItems.png monsters
+	Game.Monsters=[];
+	Game.Monster=function(name,pic,icon,level,stats,loot)
+	{
+		this.name=name;
+		this.pic=pic;
+		this.icon=icon;
+		this.level=level;
+		this.stats={};
+		for (var i in stats)
+		{this.stats[i]=stats[i];}
+		this.stats.hpm=this.stats.hp;
+		this.stats.rarity=stats.rarity||1;
+		this.loot=loot||{};
+		this.boss=0;
+		this.quotes={};
+		Game.Monsters[this.name]=this;
+	}
+	var basicLoot={cookies:{min:1,max:5,prob:0.5}};
+	var goodLoot={cookies:{min:3,max:8,prob:1},gear:{prob:0.05}};
+	var bossLoot={gear:{prob:1}};
+	var chestLoot={cookies:{min:2,max:20,prob:1},gear:{prob:0.1}};
+	var bossLoot={cookies:{min:10,max:50,prob:1},gear:{prob:0.2}};
+	
+	//general monsters
+	new Game.Monster('Doughling','doughling',[0,0],1,{hp:5,might:2,guard:2,speed:6,dodge:6,rarity:0.7},basicLoot);
+	new Game.Monster('Elder doughling','elderDoughling',[1,0],7,{hp:20,might:7,guard:7,speed:4,dodge:4,rarity:0.7},goodLoot);
+	new Game.Monster('Angry sentient cookie','angrySentientCookie',[5,0],5,{hp:16,might:8,guard:4,speed:5,dodge:5,rarity:1},basicLoot);
+	new Game.Monster('Baby sentient cookie','babySentientCookie',[4,0],1,{hp:3,might:1,guard:1,speed:7,dodge:7,rarity:1},basicLoot);
+	new Game.Monster('Burnt sentient cookie','burntSentientCookie',[6,0],5,{hp:16,might:12,guard:2,speed:3,dodge:2,rarity:0.2},basicLoot);
+	new Game.Monster('Raw sentient cookie','rawSentientCookie',[5,0],5,{hp:16,might:6,guard:4,speed:7,dodge:7,rarity:0.2},basicLoot);
+	new Game.Monster('Sugar bunny','sugarBunny',[8,0],5,{hp:10,might:3,guard:8,speed:12,dodge:9,rarity:0.001},{cookies:{min:1000,max:10000}});
+	Game.Monsters['Sugar bunny'].onKill=function(){Game.Win('Follow the white rabbit');};Game.Monsters['Sugar bunny'].AI='flee';
+	
+	//factory monsters
+	new Game.Monster('Crazed kneader','crazedKneader',[0,2],6,{hp:18,might:6,guard:8,speed:3,dodge:2,rarity:0.5},goodLoot);
+	new Game.Monster('Crazed chip-spurter','crazedDoughSpurter',[0,2],6,{hp:15,might:6,guard:8,speed:5,dodge:3,rarity:0.5},goodLoot);
+	new Game.Monster('Alarm bot','alarmTurret',[3,2],2,{hp:6,might:3,guard:5,speed:8,dodge:8,rarity:0.5},basicLoot);
+	new Game.Monster('Chirpy','chirpy',[4,2],3,{hp:7,might:4,guard:6,speed:9,dodge:9,rarity:0.01},{cookies:{min:500,max:5000}});
+	Game.Monsters['Chirpy'].onKill=function(){Game.Win('Chirped out');};Game.Monsters['Chirpy'].quotes={fight:'oh, hello <3'};
+	new Game.Monster('Disgruntled worker','disgruntledWorker',[1,2],4,{hp:14,might:5,guard:5,speed:6,dodge:4,rarity:0.6},basicLoot);
+	new Game.Monster('Disgruntled overseer','disgruntledOverseer',[1,2],7,{hp:22,might:7,guard:5,speed:6,dodge:4,rarity:0.5},basicLoot);
+	new Game.Monster('Disgruntled cleaning lady','disgruntledCleaningLady',[2,2],4,{hp:13,might:4,guard:5,speed:7,dodge:6,rarity:0.3},basicLoot);
+	
+	new Game.Monster('Sentient Furnace','sentientFurnace',[0,3],0,{hp:60,might:14,guard:12,speed:4,dodge:0,rarity:1},bossLoot);//boss
+	Game.Monsters['Sentient Furnace'].onKill=function(){Game.Win('Getting even with the oven');};Game.Monsters['Sentient Furnace'].AI='static';Game.Monsters['Sentient Furnace'].boss=1;Game.Monsters['Sentient Furnace'].quotes={fight:'YOU ARE NOT READY!',defeat:'OH... BURN.'};
+	new Game.Monster('Ascended Baking Pod','ascendedBakingPod',[1,3],0,{hp:60,might:12,guard:14,speed:4,dodge:0,rarity:0.7},bossLoot);//boss
+	Game.Monsters['Ascended Baking Pod'].onKill=function(){Game.Win('Now this is pod-smashing');};Game.Monsters['Ascended Baking Pod'].AI='static';Game.Monsters['Ascended Baking Pod'].boss=1;Game.Monsters['Ascended Baking Pod'].quotes={fight:'rrrrrrrise.',defeat:'blrglblg.'};
+	
+	
+	Game.BossMonsters=[];
+	for (var i in Game.Monsters)
+	{
+		if (Game.Monsters[i].boss) Game.BossMonsters.push(Game.Monsters[i]);
+	}
+	
+	/*=====================================================================================
+	ENTITY MECHANICS
+	=======================================================================================*/
+	
+	Game.Entity=function(type,subtype,dungeon,pic,stats)//objects you could find on the map : doors, mobs, interactables, items, player, exits...
+	{
+		this.type=type;
+		this.subtype=subtype||'';
+		this.dungeon=dungeon;
+		this.pic=pic||[0,0];
+		this.stats={};
+		for (var i in stats)
+		{this.stats[i]=stats[i];}
+		
+		this.x=-1;
+		this.y=-1;
+		this.obstacle=0;
+		this.zIndex=1;
+		if (this.type=='monster')
+		{
+			this.obstacle=1;
+			this.pic=[Game.Monsters[this.subtype].icon[0],Game.Monsters[this.subtype].icon[1]];
+			this.pic[1]+=Game.monsterIconY;
+			this.targets=[];
+			this.stuck=0;
+			this.zIndex=10;
+			this.fighting=0;
+			this.AI=Game.Monsters[this.subtype].AI||'normal';
+			this.onKill=Game.Monsters[this.subtype].onKill||function(){};
+			for (var i in Game.Monsters[this.subtype].stats){this.stats[i]=Game.Monsters[this.subtype].stats[i];}
+		}
+		else if (this.type=='hero')
+		{
+			this.obstacle=1;
+			this.pic=[Game.Heroes[this.subtype].icon[0],Game.Heroes[this.subtype].icon[1]];
+			this.targets=[];
+			this.stuck=0;
+			this.zIndex=100;
+			this.fighting=0;
+			for (var i in Game.Heroes[this.subtype].stats){this.stats[i]=Game.Heroes[this.subtype].stats[i];}
+			
+			//increase stats by amount of matching building (change that later to use gear instead)
+			var mult=Math.max(0,(Game.Objects[this.dungeon.type].amount/20-1));
+			this.stats.hpm+=Math.ceil(mult*2);
+			this.stats.hp=this.stats.hpm;
+			this.stats.might+=mult;
+			this.stats.guard+=mult;
+			this.stats.speed+=mult;
+			this.stats.dodge+=mult;
+		}
+		else if (this.type=='item')
+		{
+			this.zIndex=5;
+			this.value=0;
+		}
+		else if (this.type=='destructible')//crates, doors
+		{
+			this.obstacle=1;
+			this.life=3;
+			this.zIndex=15;
+			if (this.subtype=='door') this.pic=[0,7];
+			else this.pic=[Math.floor(Math.random()*4+2),7];
+			
+			this.onKill=function()
+			{
+				if (this.subtype=='random')
+				{
+					var value=Math.round(Math.pow(Math.random(),6)*(10+this.dungeon.level));
+					if (value>0)
+					{
+						var entity=this.dungeon.AddEntity('item','cookies',this.x,this.y);
+						entity.value=value;
+					}
+				}
+			}
+		}
+		else if (this.type=='special')
+		{
+			this.zIndex=5;
+			this.value='';
+			this.obstacle=1;
+		}
+		
+		this.Say=function(what)
+		{
+			if (this.type=='monster')
+			{
+				if (Game.Monsters[this.subtype].quotes[what]) this.dungeon.Log(this.subtype+' : "<span style="color:#f96;">'+choose(Game.Monsters[this.subtype].quotes[what].split('|'))+'</span>"');
+			}
+		}
+		this.Draw=function()//return the string to draw this
+		{
+			var name='?';
+			if (this.subtype=='random') name='clutter'; else name=this.subtype;
+			if (this.type=='item' && this.subtype=='cookies' && this.value>0)
+			{
+				if (this.value<2) this.pic=[0,5];
+				else if (this.value<3) this.pic=[1,5];
+				else if (this.value<4) this.pic=[2,5];
+				else if (this.value<6) this.pic=[3,5];
+				else if (this.value<10) this.pic=[4,5];
+				else if (this.value<20) this.pic=[5,5];
+				else if (this.value<30) this.pic=[7,5];
+				else if (this.value<70) this.pic=[6,5];
+				else if (this.value<200) this.pic=[8,5];
+				else this.pic=[6,6];// if (this.value<1000) this.pic=[1,5];
+			}
+			else if (this.type=='special' && this.subtype=='upgrade')
+			{
+				if (this.value!='') this.pic=[7,6]; else this.pic=[8,6];
+			}
+			return '<div class="thing" title="'+name+'" style="z-index:'+(200+this.zIndex)+';left:'+(this.x*16)+'px;top:'+(this.y*16)+'px;background-position:'+(-this.pic[0]*16)+'px '+(-this.pic[1]*16)+'px;"></div>';
+		}
+		this.Wander=function()//AI to move around aimlessly
+		{
+			this.targets=[];
+			this.targets.push([-1,0],[1,0],[0,-1],[0,1]);
+			this.Move();
+		}
+		this.GoTo=function(x,y)//AI to move to a specific point
+		{
+			this.targets=[];
+			if (this.x<x) this.targets.push([1,0]);
+			if (this.x>x) this.targets.push([-1,0]);
+			if (this.y<y) this.targets.push([0,1]);
+			if (this.y>y) this.targets.push([0,-1]);
+			if (!this.Move())//really stuck? try to maneuver laterally!
+			{
+				this.targets=[];
+				if (this.x==x) this.targets.push([1,0],[-1,0]);//somehow this feels inverted... but it doesn't work the other way
+				if (this.y==y) this.targets.push([0,1],[0,-1]);//hypothesis : *MAGIC*
+				this.Move();
+			}
+		}
+		this.Flee=function(x,y)//AI to run away from a specific point
+		{
+			this.targets=[];
+			if (this.x>x) this.targets.push([1,0]);
+			if (this.x<x) this.targets.push([-1,0]);
+			if (this.y>y) this.targets.push([0,1]);
+			if (this.y<y) this.targets.push([0,-1]);
+			if (!this.Move())//really stuck? try to maneuver laterally!
+			{
+				this.targets=[];
+				if (this.x==x) this.targets.push([1,0],[-1,0]);//somehow this feels inverted... but it doesn't work the other way
+				if (this.y==y) this.targets.push([0,1],[0,-1]);//hypothesis : *MAGIC*
+				this.Move();
+			}
+		}
+		this.Move=function()//AI to move to the target
+		{
+			if (this.targets.length>0)
+			{
+				var goodTargets=[];
+				if (this.type=='hero') goodTargets=this.targets;
+				else
+				{
+					for (var i in this.targets)
+					{
+						var thisTarget=this.targets[i];
+						if (this.dungeon.CheckObstacle(this.x+thisTarget[0],this.y+thisTarget[1])!=-1) goodTargets.push([thisTarget[0],thisTarget[1]]);
+					}
+				}
+				if (goodTargets.length>0)
+				{
+					var target=choose(goodTargets);
+					var obstacle=this.dungeon.CheckObstacle(this.x+target[0],this.y+target[1]);
+					if (obstacle==this) obstacle=0;
+					if (obstacle==0 && this.AI!='static')
+					{
+						this.x+=target[0];
+						this.y+=target[1];
+					}
+					else this.stuck+=2;
+					if (obstacle!=0 && obstacle!=-1)
+					{
+						obstacle.HitBy(this);
+					}
+					if (obstacle==-1) return 0;
+				}
+				else {this.stuck+=2;return 0;}
+				if (this.AI=='static') this.stuck=0;
+				return 1;
+			}
+			return 0;
+		}
+		this.HitBy=function(by)//attacked by another entity
+		{
+			if (this.type=='destructible' && by.type=='hero')//break destructibles
+			{
+				by.stuck=0;
+				this.life--;
+				if (this.life<=0)
+				{
+					if (this.onKill) this.onKill();
+					this.Destroy();
+				}
+				else this.pic=[this.pic[0],this.pic[1]+1];
+			}
+			else if (this.type=='special' && this.subtype=='upgrade')//upgrade relic
+			{
+				this.obstacle=0;
+				if (Game.Upgrades[this.value]) Game.Upgrades[this.value].earn();
+				this.value='';
+			}
+			else if ((this.type=='monster' && by.type=='hero') || (this.type=='hero' && by.type=='monster') && this.stats.hp>0)//it's a fight!
+			{
+				by.stuck=0;
+				
+				var monster=(this.type=='hero'?by:this);
+				var hero=(this.type=='hero'?this:by);
+				this.dungeon.currentOpponent=monster;
+				
+				if (monster.fighting==0)//first meeting
+				{
+					Game.Heroes[hero.subtype].Say('meet '+Game.Monsters[monster.subtype].name);
+					this.Say('fight');
+				}
+				if (this.fighting==0)
+				{
+					this.fighting=1;
+					by.fighting=1;
+				}
+				
+				var attackStr='';
+				var attackerName='';
+				var defenderName='';
+				if (by.type=='hero') attackerName=Game.Heroes[by.subtype].name;
+				else if (by.type=='monster') attackerName=Game.Monsters[by.subtype].name;
+				if (this.type=='hero') defenderName=Game.Heroes[this.subtype].name;
+				else if (this.type=='monster') defenderName=Game.Monsters[this.subtype].name;
+				
+				//battle formulas (have fun with these)
+				attackStr+=attackerName+' swings at '+defenderName+'!';
+				var damage=Math.round(Math.max(1,Math.min(by.stats.might,Math.pow(((by.stats.might+2.5)/Math.max(1,this.stats.guard)),2)))*(0.8+Math.random()*0.4+Math.pow(Math.random()*0.8,6)));
+				var dodge=Math.random()>(by.stats.speed/Math.max(1,this.stats.dodge+2.5));
+				if (dodge)
+				{
+					attackStr+=' '+defenderName+' dodged the attack.';
+				}
+				else
+				{
+					if (by.stats.luck && by.type=='hero' && Math.random()<by.stats.luck*0.01) {damage*=2;attackStr+=' <b>It\'s a critical!</b>';}//very rare critical based on luck
+					attackStr+=' <b>'+damage+'</b> damage!';
+					
+					this.stats.hp-=damage;
+					this.stats.hp=Math.max(this.stats.hp,0);
+					if (this.stats.luck && this.type=='hero')
+					{
+						if (this.stats.hp==0 && Math.random()<this.stats.luck*0.01) {this.stats.hp=1;attackStr+=' '+defenderName+' was saved from certain death!';}//very rare life-saving based on luck
+					}
+				}
+				
+				if (this.type=='hero') attackStr='<span style="color:#f99;">'+attackStr+'</span>';
+				if (attackStr!='') this.dungeon.Log(attackStr);
+				
+				if (this.stats.hp<=0)//die
+				{
+					this.dungeon.Log(attackerName+' crushed '+defenderName+'!');
+					if (this.type=='hero')
+					{
+						Game.Heroes[this.subtype].Say('defeat');
+						this.dungeon.Log('<span style="color:#f66;">'+Game.Heroes[this.subtype].name+' has been defeated.</span>');
+						this.dungeon.FailLevel();
+					}
+					if (this.type=='monster' && by.type=='hero')
+					{
+						l('monsterSlot'+this.dungeon.id).style.visibility='hidden';
+						this.dungeon.monstersKilledThisRun+=1;
+						if (Math.random()<0.05) Game.Heroes[by.subtype].Say('win');
+						Game.Heroes[by.subtype].Say('win against '+Game.Monsters[this.subtype].name);
+						this.Say('defeat');
+						if (Game.Monsters[this.subtype].loot)
+						{
+							var loot=Game.Monsters[this.subtype].loot;
+							if (loot.gear && (!loot.gear.prob || Math.random()<loot.gear.prob)) {}//drop gear
+							if (loot.cookies && (!loot.cookies.prob || Math.random()<loot.cookies.prob))
+							{
+								var entity=this.dungeon.AddEntity('item','cookies',this.x,this.y);//drop cookies
+								entity.value=Math.round(loot.cookies.min+Math.random()*(loot.cookies.max-loot.cookies.min));
+							}
+						}
+						if (this.onKill) this.onKill();
+						this.Destroy();
+					}
+				}
+			}
+		}
+		this.Turn=function()//do this every turn (walk around, heal up...)
+		{
+			if (this.type=='monster')
+			{
+				var howManyTurns=this.GetInitiative();
+				for (var i=0;i<howManyTurns;i++)
+				{
+					if (1==1)//this.AI!='static')
+					{
+						if (this.AI=='flee') this.Flee(this.dungeon.heroEntity.x,this.dungeon.heroEntity.y);//flee from the player
+						else
+						{
+							this.GoTo(this.dungeon.heroEntity.x,this.dungeon.heroEntity.y);//track the player
+							if (this.stuck || this.targets.length==[]) this.Wander();//can't reach the player? walk around randomly
+						}
+					}
+				}
+			}
+			if (this.type=='monster' || this.type=='hero')
+			{
+				if (this.stuck>0) this.stuck--;
+				this.stuck=Math.min(10,this.stuck);
+				this.targets=[];
+			}
+			if ((this.type=='hero' || this.type=='monster') && this.fighting==0 && this.stats.hp<this.stats.hpm) this.stats.hp++;//heal up
+			if (this.type=='hero')//collect items and cookies
+			{
+				var entities=this.dungeon.GetEntities(this.x,this.y);
+				for (var i in entities)
+				{
+					if (entities[i].type=='item' && entities[i].subtype=='cookies')
+					{
+						var entity=entities[i];
+						var value=Math.ceil(entity.value*Game.Objects[this.dungeon.type].amount*50*(1+Math.random()*((this.stats.luck)/20)));//temporary; scale with matching building CpS later
+						if (value>0)
+						{
+							this.dungeon.Log('<span style="color:#9f9;">Found <b>'+Beautify(value)+'</b> cookie'+(value==1?'':'s')+'!</span>');
+							this.dungeon.cookiesMadeThisRun+=value;
+							Game.Earn(value);
+						}
+						entity.Destroy();
+					}
+				}
+			}
+			if (this.type=='hero') this.fighting=0;
+		}
+		this.Destroy=function()
+		{
+			this.dungeon.entities.splice(this.dungeon.entities.indexOf(this),1);
+		}
+		this.GetInitiative=function()
+		{
+			return randomFloor((this.stats.speed/5)*(1/Math.max(1,(this.dungeon.heroEntity.stats.speed/5))));
+		}
+	}
+	
+	/*=====================================================================================
+	DUNGEON MECHANICS
+	=======================================================================================*/
+	
+	Game.Dungeons=[];
+	Game.Dungeon=function(type,id)
+	{
+		this.type=type;
+		this.id=id;
+		Game.Dungeons[this.id]=this;
+		this.log=[];
+		this.logNew=0;
+		this.name=Game.DungeonTypes[this.type].nameGenerator();
+		this.hero=null;
+		this.currentOpponent=0;
+		this.level=0;
+		this.auto=1;
+		this.portalPic='';
+		
+		this.cookiesMadeThisRun=0;
+		this.monstersKilledThisRun=0;
+		
+		this.Log=function(what,nested)
+		{
+			if (typeof what==='string')
+			{
+				this.log.unshift(what);
+				this.logNew++;
+			}
+			else {for (var i in what) {this.Log(what[i],1);}}
+			//if (!nested) this.UpdateLog();
+		}
+		
+		this.UpdateLog=function()
+		{
+			this.log=this.log.slice(0,30);
+			var str='';
+			for (var i in this.log)
+			{
+				if (i<this.logNew) str+='<div class="new">'+this.log[i]+'</div>';
+				else str+='<div>'+this.log[i]+'</div>';
+			}
+			this.logNew=0;
+			l('dungeonLog'+this.id).innerHTML=str;
+		}
+		
+		this.entities=[];
+		this.GetEntities=function(x,y)//returns the first entity found on tile x,y
+		{
+			var entities=[];
+			for (var i in this.entities) {if (this.entities[i].x==x && this.entities[i].y==y) entities.push(this.entities[i]);}
+			return entities;
+		}
+		this.AddEntity=function(type,subtype,x,y)
+		{
+			//this.RemoveEntities(x,y);
+			var entity=new Game.Entity(type,subtype,this);
+			entity.x=x;
+			entity.y=y;
+			entity.dungeon=this;
+			this.entities.push(entity);
+			return entity;
+		}
+		this.RemoveEntities=function(x,y)
+		{
+			var entities=this.GetEntities(x,y);
+			for (var i in entities)
+			{
+				entities[i].Destroy();
+			}
+		}
+		this.DrawEntities=function()
+		{
+			var str='';
+			for (var i in this.entities) {str+=this.entities[i].Draw();}
+			return str;
+		}
+		
+		this.CheckObstacle=function(x,y)//returns 0 for no obstacle; -1 for a wall; an entity if there's at least one entity on this tile
+		{
+			if (x<0 || x>=this.map.w || y<0 || y>=this.map.h) return -1;
+			var entities=this.GetEntities(x,y);
+			for (var i in entities)
+			{
+				if (entities[i].obstacle) return entities[i];
+			}
+			return this.map.isObstacle(x,y)?-1:0;
+		}
+		
+		
+		this.map={};
+		this.Generate=function()
+		{
+			if (this.level==0) this.name=Game.DungeonTypes[this.type].nameGenerator();
+			this.entities=[];
+			var M=new D.Map(40,40,Math.random(),{
+				roomSize:10,
+				corridorSize:5,
+				fillRatio:1/2,
+				corridorRatio:0.3,
+				pillarRatio:Math.random()*0.8+0.2,
+				waterRatio:Math.random(),
+				branching:Math.ceil(Math.random()*6),
+				sizeVariance:0.4
+			});
+			r=0;
+			while (r!=1)
+			{
+				r=M.dig();
+			}
+			//all done! decorate and render.
+			M.finish();
+			//spawn treasure
+			/*
+			for (var i in M.rooms)
+			{
+				if (M.rooms[i].freeTiles>1)
+				{
+					for (var ii=0;ii<Math.ceil(Math.sqrt(M.rooms[i].freeTiles*(M.rooms[i].gen*0.25+0.1))/2);ii++)
+					{
+						if (Math.random()<0.95 && M.rooms[i].freeTiles>1)
+						{
+							var spot=M.getBestSpotInRoom(M.rooms[i]);
+							M.data[spot.x][spot.y][0]=0;
+							spot.score=0;
+							M.rooms[i].freeTiles--;
+						}
+					}
+				}
+			}*/
+			
+			for (var i in M.doors)//place door entities on door positions
+			{
+				//M.data[M.doors[i][0]][M.doors[i][1]][0]=TILE_FLOOR_EDGE;
+				this.AddEntity('destructible','door',M.doors[i][0],M.doors[i][1]);
+			}
+			//set tile graphics
+			for (var i in M.rooms)
+			{
+				var altStr=choose(['alt ','','']);
+				var tiles={
+				'void':altStr+'void',
+				'wall':altStr+'wall',
+				'wall corner':altStr+'wall corner',
+				'floor':altStr+'tiled floor',
+				'floor edges':altStr+'floor',//choose([altStr+'floor',altStr+'floor edges']),
+				'door':altStr+'door',
+				'water':choose(['water','green water','dark water']),
+				'pillar':choose([altStr+'wall',altStr+'round pillar',altStr+'square pillar',altStr+'potted plant','conveyor belt']),
+				'entrance':altStr+'entrance',
+				'exit':altStr+'exit',
+				};
+				if (Math.random()<0.1) {tiles['wall corner']='wooden wall';tiles['wall']='wooden wall';tiles['floor edges']='wooden floor';tiles['pillar']='wooden wall';}
+				if (Math.random()<0.1) {tiles['wall corner']=altStr+'bookshelf';tiles['wall']=altStr+'bookshelf';tiles['pillar']=altStr+'bookshelf';}
+				M.assignTiles(M.rooms[i],tiles);
+			}
+			this.map=M;
+			this.map.str=this.map.getStr();
+			
+			//place a boss
+			var tile=this.map.exit;
+			var monsters=[];
+			for (var ii in Game.BossMonsters)
+			{
+				var me=Game.BossMonsters[ii];
+				if (me.level<=(depth+this.level) && Math.random()<(me.stats.rarity||1)) monsters.push(me.name);
+			}
+			if (monsters.length==0) monsters=[choose(Game.BossMonsters).name];
+			if (monsters.length>0)
+			{
+				this.AddEntity('monster',choose(monsters),tile[0],tile[1]);
+				this.map.removeFreeTile(tile[0],tile[1]);
+			}
+			
+			//place relics
+			/*
+			var tile=this.map.getBestSpotInRoom(this.map.getRoom(this.map.exit[0],this.map.exit[1]));
+			var entity=this.AddEntity('special','upgrade',tile.x,tile.y);
+			entity.value='Dungeon cookie upgrade';
+			this.map.removeFreeTile(tile.x,tile.y);
+			for (var i=0;i<Math.floor(Math.pow(Math.random(),2)*3);i++)
+			{
+				var room=choose(this.map.rooms);
+				if (room.freeTiles.length>10)
+				{
+					var tile=this.map.getBestSpotInRoom(room);
+					var entity=this.AddEntity('special','upgrade',tile.x,tile.y);
+					entity.value='Dungeon cookie upgrade';
+					this.map.removeFreeTile(tile.x,tile.y);
+				}
+			}*/
+			
+			//sprinkle monsters and treasure
+			for (var i=0;i<Math.ceil(this.map.freeTiles.length*0.7);i++)//let's fill this up with A LOT of stuff
+			{
+				var tile=choose(this.map.freeTiles);
+				if (tile!=-1)
+				{
+					var room=this.map.getRoom(tile[0],tile[1]);
+					var depth=room.gen+1;
+					if (Math.random()<0.2)//2 in 10 spawns are monsters
+					{
+						var monsters=[];
+						for (var ii in Game.Monsters)
+						{
+							var me=Game.Monsters[ii];
+							if (me.level!=0 && me.level<=(depth+this.level) && Math.random()<(me.stats.rarity||1)) monsters.push(me.name);//spawn type depending on monster level and rarity
+						}
+						if (monsters.length>0)
+						{
+							this.AddEntity('monster',choose(monsters),tile[0],tile[1]);
+							this.map.removeFreeTile(tile[0],tile[1]);
+						}
+					}
+					else//the rest of the spawns are destructibles or loot
+					{
+						if (Math.random()<0.6)
+						{
+							var value=Math.round(Math.pow(Math.random(),6)*(10+this.level));
+							if (value>0)
+							{
+								var entity=this.AddEntity('item','cookies',tile[0],tile[1]);//random cookies
+								entity.value=value;
+							}
+						}
+						else this.AddEntity('destructible','random',tile[0],tile[1]);//random crates etc
+						this.map.removeFreeTile(tile[0],tile[1]);
+					}
+				}
+			}
+		}
+		
+		this.onTile=-1;
+		
+		this.Draw=function()
+		{
+			var str='';
+			var x=-this.hero.x;
+			var y=-this.hero.y;
+			str+='<div id="map'+this.id+'" class="map" style="width:'+(9*16)+'px;height:'+(9*16)+'px;"><div class="mapContainer" id="mapcontainer'+this.id+'" style="position:absolute;left:'+(x*16)+'px;top:'+(y*16)+'px;"><div id="mapitems'+this.id+'"></div>'+this.map.str+'</div></div>';
+			str+='<div style="position:absolute;left:'+(9*16+16)+'px;">'+
+			'<a class="control west" onclick="Game.HeroesById['+this.hero.id+'].Move(-1,0);"></a><br>'+
+			'<a class="control east" onclick="Game.HeroesById['+this.hero.id+'].Move(1,0);"></a><br>'+
+			'<a class="control north" onclick="Game.HeroesById['+this.hero.id+'].Move(0,-1);"></a><br>'+
+			'<a class="control south" onclick="Game.HeroesById['+this.hero.id+'].Move(0,1);"></a><br>'+
+			'<a class="control middle" onclick="Game.HeroesById['+this.hero.id+'].Move(0,0);"></a><br>'+
+			'</div>';
+			str+='<div style="position:absolute;left:'+(9*16+16+48*3)+'px;bottom:16px;height:100%;">'+
+			'<div class="dungeonName"><a onclick="Game.ObjectsById['+this.id+'].setSpecial(0);">Exit</a> - <span class="title" style="font-size:12px;">'+this.name+'</span> lvl.'+(this.level+1)+'</div>'+
+			'<div id="heroSlot'+this.id+'" class="mobSlot"><div id="picHero'+this.id+'" class="mobPic"></div><div id="nameHero'+this.id+'" class="title mobName"></div><div class="hpmBar"><div id="hpHero'+this.id+'" class="hpBar"></div></div></div>'+
+			'<div id="monsterSlot'+this.id+'" class="mobSlot" style="left:128px;"><div id="picMonster'+this.id+'" class="mobPic"></div><div id="nameMonster'+this.id+'" class="title mobName"></div><div class="hpmBar"><div id="hpMonster'+this.id+'" class="hpBar"></div></div></div>'+
+			'</div>'+
+			'<div id="dungeonLog'+this.id+'" class="dungeonLog"></div>';
+			l('rowSpecial'+this.id).innerHTML='<div style="width:100%;height:100%;z-index:10000;position:absolute;left:0px;top:0px;">'+str+'</div>';
+			
+			l('picHero'+this.id).style.backgroundImage='url(img/'+this.hero.portrait+'.png)';
+			l('nameHero'+this.id).innerHTML=this.hero.name;
+		}
+		this.Refresh=function()
+		{
+			if (!l('mapcontainer'+this.id)) this.Draw();
+			var x=4-this.hero.x;
+			var y=4-this.hero.y;
+			l('mapcontainer'+this.id).style.left=(x*16)+'px';
+			l('mapcontainer'+this.id).style.top=(y*16)+'px';
+			l('mapitems'+this.id).innerHTML=this.DrawEntities();
+		}
+		this.RedrawMap=function()
+		{
+			this.map.str=this.map.getStr();
+			this.Draw();
+		}
+		this.Turn=function()
+		{
+			for (var i in this.entities)
+			{
+				if (this.entities[i] && this.entities[i].type) this.entities[i].Turn();
+			}
+			if (this.currentOpponent)
+			{
+				l('monsterSlot'+this.id).style.visibility='visible';
+				l('hpMonster'+this.id).style.width=Math.round((this.currentOpponent.stats.hp/this.currentOpponent.stats.hpm)*100)+'%';
+				l('picMonster'+this.id).style.backgroundImage='url(img/'+Game.Monsters[this.currentOpponent.subtype].pic+'.png)';
+				l('nameMonster'+this.id).innerHTML=Game.Monsters[this.currentOpponent.subtype].name;
+				l('picHero'+this.id).style.backgroundImage='url(img/'+this.hero.pic+'.png)';
+			}
+			else
+			{
+				l('monsterSlot'+this.id).style.visibility='hidden';
+				l('hpMonster'+this.id).style.width='100%';
+				l('picHero'+this.id).style.backgroundImage='url(img/'+this.hero.portrait+'.png)';
+			}
+			this.currentOpponent=0;
+			l('hpHero'+this.id).style.width=Math.round((this.heroEntity.stats.hp/this.heroEntity.stats.hpm)*100)+'%';
+				
+			this.Refresh();
+			this.UpdateLog();
+			
+			if (this.hero.x==this.map.exit[0] && this.hero.y==this.map.exit[1])
+			{
+				this.CompleteLevel();
+			}
+		}
+		
+		this.DrawButton=function()
+		{
+			var str='';
+			//str+='<div style="text-align:center;margin:48px auto;color:#999;"><a onclick="Game.ObjectsById['+this.id+'].setSpecial(1);">Enter</a></div>';
+			str+='<div style="width:144px;height:144px;position:absolute;left:0px;bottom:0px;"><a class="specialButtonPic" style="background-image:url(img/'+this.portalPic+'.png);" onclick="Game.ObjectsById['+this.id+'].setSpecial(1);"><div class="specialButtonText">Enter dungeons</div></a></div>';
+			return str;
+		}
+		
+		this.CompleteLevel=function()
+		{
+			this.hero.Say('completion');
+			this.level++;
+			this.Generate();
+			Game.HeroesById[0].EnterDungeon(this,this.map.entrance[0],this.map.entrance[1]);
+			this.Draw();
+		}
+		this.FailLevel=function()
+		{
+			this.Log('Cookies made this run : '+Beautify(this.cookiesMadeThisRun)+' | Monsters defeated this run : '+Beautify(this.monstersKilledThisRun));
+			this.cookiesMadeThisRun=0;
+			this.monstersKilledThisRun=0;
+			this.level=0;
+			this.Generate();
+			Game.HeroesById[0].EnterDungeon(this,this.map.entrance[0],this.map.entrance[1]);
+			this.Draw();
+		}
+	}
+	
+	Game.DungeonLocationChain=function(map,x,y)//return an array of the rooms between the root room and this tile's room, inclusive
+	{//we shouldn't need all this if we used A*...
+		var room=map.getRoom(x,y);
+		var chain=[];
+		if (room!=-1)
+		{
+			while (room.parent)
+			{
+				chain.push(room);
+				room=room.parent;
+			}
+		}
+		chain.reverse();
+		return chain;
+	}
+	Game.DungeonLinkLocationChains=function(start,end)//return the room in which the first location chain should go to to get closer to the second location chain
+	{
+		/*
+		4 cases
+		-we're already in the same room
+		-the target is in a different branch
+		-the target is above in the same branch
+		-the target is below in the same branch
+		*/
+		start.reverse();
+		end.reverse();
+		if (start[0].id==end[0].id) return start[start.length-1];//same room
+		for (var i in end)
+		{
+			if (start[0]==end[i].parent) return end[i];//inferior branch, go to the inferior room
+		}
+		if (start.length>1) return start[1];//different or superior branch, go to the superior room
+		return start[0];//eeeh, let's just stay in the same room
+	}
+	
+	/*=====================================================================================
+	CREATE DUNGEONS
+	=======================================================================================*/
+	Game.Objects['Factory'].special=function()
+	{
+		this.dungeon=new Game.Dungeon('Factory',this.id);
+		this.dungeon.Generate();
+		this.specialDrawFunction=function(){this.dungeon.Refresh();};
+		this.drawSpecialButton=function(){return this.dungeon.DrawButton();};
+		this.dungeon.timer=0;
+		this.dungeon.timerWarmup=5;
+		this.dungeon.portalPic='dungeonFactory';
+		
+		this.EachFrame=function()
+		{
+			if (this.dungeon.auto)
+			{
+				if (this.dungeon.timer>0) this.dungeon.timer--;
+				if (this.dungeon.timer==0)
+				{
+					this.dungeon.timer=Game.fps*(Math.max(0.1,2-(this.dungeon.hero.stats.speed*0.2))+Math.max(this.dungeon.timerWarmup,0));
+					if (this.dungeon.timerWarmup>0) this.dungeon.timerWarmup--;
+					
+					var dungeon=this.dungeon;
+					var hero=dungeon.heroEntity;
+					
+					var targetRoom=Game.DungeonLinkLocationChains(Game.DungeonLocationChain(dungeon.map,hero.x,hero.y),Game.DungeonLocationChain(dungeon.map,dungeon.map.exit[0],dungeon.map.exit[1]));
+					var targetTile=(targetRoom.gen==0 || targetRoom.id==dungeon.map.getRoom(hero.x,hero.y).id)?[dungeon.map.exit[0],dungeon.map.exit[1]]:targetRoom.door;
+					hero.GoTo(targetTile[0],targetTile[1]);
+					if (hero.stuck) hero.Wander();
+					dungeon.hero.x=hero.x;
+					dungeon.hero.y=hero.y;
+					dungeon.Turn();
+				}
+			}
+		}
+		
+		if (document.addEventListener)//clean this up later
+		{
+			l('rowSpecial'+this.dungeon.id).removeEventListener('keydown',arguments.callee,false);
+			l('rowSpecial'+this.dungeon.id).addEventListener('keydown',function(event)
+			{
+				var dungeon=Game.Objects['Factory'].dungeon;
+				var control=0;
+				if (event.keyCode==37) {dungeon.hero.Move(-1,0);control=1;}
+				else if (event.keyCode==38) {dungeon.hero.Move(0,-1);control=1;}
+				else if (event.keyCode==39) {dungeon.hero.Move(1,0);control=1;}
+				else if (event.keyCode==40) {dungeon.hero.Move(0,1);control=1;}
+				else if (event.keyCode==32) {dungeon.hero.Move(0,0);control=1;}//space
+				else if (event.keyCode==65)//A (auto)
+				{
+					if (dungeon.auto)
+					{
+						dungeon.auto=0;
+						dungeon.timerWarmup=-1;
+					}
+					else
+					{
+						dungeon.auto=1;
+						dungeon.timer=0;
+						dungeon.timerWarmup=0;
+					}
+					event.preventDefault();
+				}
+				
+				if (control)
+				{
+					event.preventDefault();
+					dungeon.timer=Game.fps*10;
+					dungeon.timerWarmup=5;
+				}
+			}
+			);
+		}
+		
+		var hero=choose(Game.HeroesById);
+		hero.EnterDungeon(this.dungeon,this.dungeon.map.entrance[0],this.dungeon.map.entrance[1]);
+	}
+	
+	/*=====================================================================================
+	HEROES
+	=======================================================================================*/
+	Game.Heroes=[];
+	Game.HeroesById=[];
+	Game.Hero=function(name,pic,portrait,icon)
+	{
+		this.name=name;
+		this.pic=pic;
+		this.portrait=portrait;
+		this.icon=icon;
+		this.stats={
+			hp:25,
+			hpm:25,
+			might:5,
+			guard:5,
+			speed:5,
+			dodge:5,
+			luck:5
+		};
+		this.dialogue={
+			'greeting':'Oh hey.|Sup.',
+			'entrance':'Here we go.|So exciting.',
+			'completion':'That was easy.|All done here.',
+			'defeat':'Welp.|Better luck next time.'
+		};
+		this.gear={
+			'armor':-1,
+			'weapon':-1
+		};
+		this.inDungeon=-1;
+		this.completedDungeons=0;
+		
+		this.x=0;
+		this.y=0;
+		
+		this.EnterDungeon=function(dungeon,x,y)
+		{
+			this.inDungeon=dungeon.id;
+			dungeon.hero=this;
+			this.x=x;
+			this.y=y;
+			dungeon.heroEntity=dungeon.AddEntity('hero',dungeon.hero.name,x,y);
+			var room=dungeon.map.getRoom(this.x,this.y);
+			if (room!=-1 && room.hidden) {room.hidden=0;dungeon.RedrawMap();}
+			Game.Dungeons[this.inDungeon].Refresh();
+			dungeon.Log('--------------------');
+			if (dungeon.level==0) this.Say('greeting');
+			this.Say('entrance');
+			l('monsterSlot'+dungeon.id).style.visibility='hidden';
+		}
+		this.Move=function(x,y)
+		{
+			var dungeon=Game.Dungeons[this.inDungeon];
+			dungeon.heroEntity.targets=[[x,y]];
+			if (dungeon.heroEntity.Move())
+			{
+				this.x=dungeon.heroEntity.x;
+				this.y=dungeon.heroEntity.y;
+				dungeon.Turn();
+			}
+		}
+		
+		this.Say=function(what)
+		{
+			if (this.dialogue[what]) Game.Dungeons[this.inDungeon].Log(this.name+' : "<span style="color:#99f;">'+choose(this.dialogue[what].split('|'))+'</span>"');
+		}
+		
+		this.save=function()
+		{
+			var str='';
+			str+=
+			this.inDungeon+','+
+			this.completedDungeons+','+
+			this.gear.armor+','+
+			this.gear.weapon
+			;
+			return str;
+		}
+		this.load=function(data)
+		{
+			var str=data.split(',');
+			this.inDungeon=parseInt(str[0]);
+			this.completedDungeons=parseInt(str[1]);
+			this.gear.armor=parseInt(str[2]);
+			this.gear.weapon=parseInt(str[3]);
+		}
+		this.id=Game.HeroesById.length;
+		Game.HeroesById.push(this);
+		Game.Heroes[this.name]=this;
+	}
+	
+	/*=====================================================================================
+	CREATE HEROES
+	=======================================================================================*/
+	var hero=new Game.Hero('Chip','girlscoutChip','portraitChip',[1,0]);
+	hero.dialogue={
+		'intro':'I\'m Chip! I just really like exploring stuff. Let\'s go have an adventure!',
+		'greeting':'Hello there!|I\'m ready!|Where are we going today?|Adventure!',
+		'win':'Take that!|Hah!|That\'s right.',
+		'entrance':'Chipping in!|Welp, here goes nothing!|I wonder what I\'ll find!|Hey, this place is new!|This place seems familiar.|Let\'s make it happen.',
+		'completion':'I\'m one smart cookie.|Oh yeah!|Let\'s explore some more!|That was easy!|That sure was fun!|I\'m not lost, am I?|More exploring? Sure, why not!',
+		'defeat':'B-better luck next time.|That really hurt!|I yield! I yield!|That went badly.|No half-baked excuses next time.|I think I scraped my knee!|Owie.|Woopsie!',
+		'win against Sentient Furnace':'The irony, it burns! (...it\'s funny because it was burning. And made of iron. ...Moving on.)',
+		'win against Ascended Baking Pod':'Where is your pod now?|That was disturbing.'
+	};
+	hero.stats={
+		hp:30,
+		hpm:30,
+		might:5,
+		guard:5,
+		speed:5,
+		dodge:5,
+		luck:5
+	};
+	var hero=new Game.Hero('Crumb','girlscoutCrumb','portraitCrumb',[2,0]);
+	hero.dialogue={
+		'intro':'I\'m Crumb. I look like this because of a baking accident when I was little. Big deal. At least now I don\'t get hurt as easily as others, I guess.',
+		'greeting':'Hi there.|Ready for adventure, I guess.|Reporting for duty.',
+		'win':'Oh sorry, did that hurt?|Should have moved out of the way.|Oops. My bad.',
+		'entrance':'Let\'s do this, I guess.|Well, let\'s go...|I gotta go in there?|Are we really doing this?|I hope I won\'t get lost like last time.|Let\'s get this over with.',
+		'completion':'I... I did it...|I\'m glad that\'s over.|What, there\'s more?|In I go, I guess.|It doesn\'t end, does it?|But it\'s dark in there.',
+		'defeat':'I, uh, ouch.|Why does that always happen to me?|I\'m just no good, am I?|Oh no.|I\'m... I\'m not crying.|Well that wasn\'t fun at all.|I\'m sorry I failed you.|Please... make them go away...',
+		'meet Ascended Baking Pod':'That thing shouldn\'t even be alive.|Is that where they all came from?',
+		'win against Ascended Baking Pod':'Hm. Fascinating.'
+	};
+	hero.stats={
+		hp:25,
+		hpm:25,
+		might:5,
+		guard:7,
+		speed:4,
+		dodge:4,
+		luck:5
+	};
+	var hero=new Game.Hero('Doe','girlscoutDoe','portraitDoe',[3,0]);
+	hero.dialogue={
+		'intro':'H-hey. Name\'s Doe. I\'m pretty fast. I uh, I promise I\'ll do my best.',
+		'greeting':'H-hey.|Oh, uh, h-hi there.|C-can I join?',
+		'win':'Th-that looks like it hurt... awesome...|D-did I do that?|N-neat... there\'s pieces everywhere.',
+		'entrance':'Alright, let\'s do this!|I-if I really have to.|I-in there? By myself?|...won\'t you come with me this time?|H-here I go!',
+		'completion':'Oh... oh my.|That\'s... I uh, I\'m glad.|Y-yeah that was real easy. Piece of pie!|T-too easy, right?|S-so many cookies...|Ooh? F-fascinating.',
+		'defeat':'I-if you can\'t beat them... join them.|I-it\'s because I stutter, isn\'t it?|W-well that\'s just no good at all.|I, uh, I meant for that to happen.|H-how embarrassing.',
+		'meet Ascended Baking Pod':'W-whoah... it\'s... magnificent...',
+		'win against Ascended Baking Pod':'I\'m sorry, buddy.|I... I think I hurt it...|Oh no... I-I think I broke it...'
+	};
+	hero.stats={
+		hp:25,
+		hpm:25,
+		might:4,
+		guard:4,
+		speed:7,
+		dodge:5,
+		luck:5
+	};
+	var hero=new Game.Hero('Lucky','girlscoutLucky','portraitLucky',[4,0]);
+	hero.dialogue={
+		'intro':'Oh joy! My name\'s Lucky. Guess what I\'m good at?',
+		'greeting':'I\'m feeling lucky!|It\'s a bright day today!|Let\'s do great things together.',
+		'win':'Ooh lucky shot!|Pow! One more.|Damn straight!',
+		'entrance':'Glad to be of service!|Oooh this one\'ll be interesting.|This will be a good one, I can feel it!|Here I come!',
+		'completion':'Over already?|Let\'s explore some more!|That was lucky!|That was no luck, I\'m just that good.|Alright, let\'s move on!|I\'m just getting warmed up!',
+		'defeat':'I can\'t believe it!|...This is a joke, right?|Hey! No fair!|B-but...|I\'m gonna need a bandaid. And some hot chocolate.|I\'ll, uh, try again later.|Bad luck! Bad luck!',
+		'win against Ascended Baking Pod':'Golly, that was peculiar.'
+	};
+	hero.stats={
+		hp:25,
+		hpm:25,
+		might:5,
+		guard:4,
+		speed:4,
+		dodge:5,
+		luck:7
+	};
+	
+};
+</script>
+<script>
+var M={};
+M.parent=Game.Objects['Wizard tower'];
+M.parent.minigame=M;
+M.launch=function()
+{
+	var M=this;
+	M.name=M.parent.minigameName;
+	M.init=function(div)
+	{
+		//populate div with html and initialize values
+		
+		M.spells={
+			'conjure baked goods':{
+				name:'Conjure Baked Goods',
+				desc:'Summon half an hour worth of your CpS, capped at 15% of your cookies owned.',
+				failDesc:'Trigger a 15-minute clot and lose 15 minutes of CpS.',
+				icon:[21,11],
+				costMin:2,
+				costPercent:0.4,
+				win:function()
+				{
+					var val=Math.max(7,Math.min(Game.cookies*0.15,Game.cookiesPs*60*30));
+					Game.Earn(val);
+					Game.Notify('Conjure baked goods!','You magic <b>'+Beautify(val)+' cookie'+(val==1?'':'s')+'</b> out of thin air.',[21,11],6);
+					Game.Popup('<div style="font-size:80%;">+'+Beautify(val)+' cookie'+(val==1?'':'s')+'!</div>',Game.mouseX,Game.mouseY);
+				},
+				fail:function()
+				{
+					var buff=Game.gainBuff('clot',60*15,0.5);
+					var val=Math.min(Game.cookies*0.15,Game.cookiesPs*60*15)+13;
+					val=Math.min(Game.cookies,val);
+					Game.Spend(val);
+					Game.Notify(buff.name,buff.desc,buff.icon,6);
+					Game.Popup('<div style="font-size:80%;">Backfire!<br>Summoning failed! Lost '+Beautify(val)+' cookie'+(val==1?'':'s')+'!</div>',Game.mouseX,Game.mouseY);
+				},
+			},
+			'hand of fate':{
+				name:'Force the Hand of Fate',
+				desc:'Summon a random golden cookie. Each existing golden cookie makes this spell +15% more likely to backfire.',
+				failDesc:'Summon an unlucky wrath cookie.',
+				icon:[22,11],
+				costMin:10,
+				costPercent:0.6,
+				failFunc:function(fail)
+				{
+					return fail+0.15*Game.shimmerTypes['golden'].n;
+				},
+				win:function()
+				{
+					var newShimmer=new Game.shimmer('golden',{noWrath:true});
+					var choices=[];
+					choices.push('frenzy','multiply cookies');
+					if (!Game.hasBuff('Dragonflight')) choices.push('click frenzy');
+					if (Math.random()<0.1) choices.push('chain cookie','cookie storm','blab');
+					if (Game.BuildingsOwned>=10 && Math.random()<0.25) choices.push('building special');
+					//if (Math.random()<0.2) choices.push('clot','cursed finger','ruin cookies');
+					if (Math.random()<0.15) choices=['cookie storm drop'];
+					if (Math.random()<0.0001) choices.push('free sugar lump');
+					newShimmer.force=choose(choices);
+					if (newShimmer.force=='cookie storm drop')
+					{
+						newShimmer.sizeMult=Math.random()*0.75+0.25;
+					}
+					Game.Popup('<div style="font-size:80%;">Promising fate!</div>',Game.mouseX,Game.mouseY);
+				},
+				fail:function()
+				{
+					var newShimmer=new Game.shimmer('golden',{wrath:true});
+					var choices=[];
+					choices.push('clot','ruin cookies');
+					if (Math.random()<0.1) choices.push('cursed finger','blood frenzy');
+					if (Math.random()<0.003) choices.push('free sugar lump');
+					if (Math.random()<0.1) choices=['blab'];
+					newShimmer.force=choose(choices);
+					Game.Popup('<div style="font-size:80%;">Backfire!<br>Sinister fate!</div>',Game.mouseX,Game.mouseY);
+				},
+			},
+			'stretch time':{
+				name:'Stretch Time',
+				desc:'All active buffs gain 10% more time (up to 5 more minutes).',
+				failDesc:'All active buffs are shortened by 20% (up to 10 minutes shorter).',
+				icon:[23,11],
+				costMin:8,
+				costPercent:0.2,
+				win:function()
+				{
+					var changed=0;
+					for (var i in Game.buffs)
+					{
+						var me=Game.buffs[i];
+						var gain=Math.min(Game.fps*60*5,me.maxTime*0.1);
+						me.maxTime+=gain;
+						me.time+=gain;
+						changed++;
+					}
+					if (changed==0){Game.Popup('<div style="font-size:80%;">No buffs to alter!</div>',Game.mouseX,Game.mouseY);return -1;}
+					Game.Popup('<div style="font-size:80%;">Zap! Buffs lengthened.</div>',Game.mouseX,Game.mouseY);
+				},
+				fail:function()
+				{
+					var changed=0;
+					for (var i in Game.buffs)
+					{
+						var me=Game.buffs[i];
+						var loss=Math.min(Game.fps*60*10,me.time*0.2);
+						me.time-=loss;
+						me.time=Math.max(me.time,0);
+						changed++;
+					}
+					if (changed==0){Game.Popup('<div style="font-size:80%;">No buffs to alter!</div>',Game.mouseX,Game.mouseY);return -1;}
+					Game.Popup('<div style="font-size:80%;">Backfire!<br>Fizz! Buffs shortened.</div>',Game.mouseX,Game.mouseY);
+				},
+			},
+			'spontaneous edifice':{
+				name:'Spontaneous Edifice',
+				desc:'The spell picks a random building you could afford if you had twice your current cookies, and gives it to you for free. The building selected must be under 400, and cannot be your most-built one (unless it is your only one).',
+				failDesc:'Lose a random building.',
+				icon:[24,11],
+				costMin:20,
+				costPercent:0.75,
+				win:function()
+				{
+					var buildings=[];
+					var max=0;
+					var n=0;
+					for (var i in Game.Objects)
+					{
+						if (Game.Objects[i].amount>max) max=Game.Objects[i].amount;
+						if (Game.Objects[i].amount>0) n++;
+					}
+					for (var i in Game.Objects)
+					{if ((Game.Objects[i].amount<max || n==1) && Game.Objects[i].getPrice()<=Game.cookies*2 && Game.Objects[i].amount<400) buildings.push(Game.Objects[i]);}
+					if (buildings.length==0){Game.Popup('<div style="font-size:80%;">No buildings to improve!</div>',Game.mouseX,Game.mouseY);return -1;}
+					var building=choose(buildings);
+					building.buyFree(1);
+					Game.Popup('<div style="font-size:80%;">A new '+building.single+'<br>bursts out of the ground.</div>',Game.mouseX,Game.mouseY);
+				},
+				fail:function()
+				{
+					if (Game.BuildingsOwned==0){Game.Popup('<div style="font-size:80%;">Backfired, but no buildings to destroy!</div>',Game.mouseX,Game.mouseY);return -1;}
+					var buildings=[];
+					for (var i in Game.Objects)
+					{if (Game.Objects[i].amount>0) buildings.push(Game.Objects[i]);}
+					var building=choose(buildings);
+					building.sacrifice(1);
+					Game.Popup('<div style="font-size:80%;">Backfire!<br>One of your '+building.plural+'<br>disappears in a puff of smoke.</div>',Game.mouseX,Game.mouseY);
+				},
+			},
+			'haggler\'s charm':{
+				name:'Haggler\'s Charm',
+				desc:'Upgrades are 2% cheaper for 1 minute.',
+				failDesc:'Upgrades are 2% more expensive for an hour.<q>What\'s that spell? Loadsamoney!</q>',
+				icon:[25,11],
+				costMin:10,
+				costPercent:0.1,
+				win:function()
+				{
+					Game.killBuff('Haggler\'s misery');
+					var buff=Game.gainBuff('haggler luck',60,2);
+					Game.Popup('<div style="font-size:80%;">Upgrades are cheaper!</div>',Game.mouseX,Game.mouseY);
+				},
+				fail:function()
+				{
+					Game.killBuff('Haggler\'s luck');
+					var buff=Game.gainBuff('haggler misery',60*60,2);
+					Game.Popup('<div style="font-size:80%;">Backfire!<br>Upgrades are pricier!</div>',Game.mouseX,Game.mouseY);
+				},
+			},
+			'summon crafty pixies':{
+				name:'Summon Crafty Pixies',
+				desc:'Buildings are 2% cheaper for 1 minute.',
+				failDesc:'Buildings are 2% more expensive for an hour.',
+				icon:[26,11],
+				costMin:10,
+				costPercent:0.2,
+				win:function()
+				{
+					Game.killBuff('Nasty goblins');
+					var buff=Game.gainBuff('pixie luck',60,2);
+					Game.Popup('<div style="font-size:80%;">Crafty pixies!<br>Buildings are cheaper!</div>',Game.mouseX,Game.mouseY);
+				},
+				fail:function()
+				{
+					Game.killBuff('Crafty pixies');
+					var buff=Game.gainBuff('pixie misery',60*60,2);
+					Game.Popup('<div style="font-size:80%;">Backfire!<br>Nasty goblins!<br>Buildings are pricier!</div>',Game.mouseX,Game.mouseY);
+				},
+			},
+			'gambler\'s fever dream':{
+				name:'Gambler\'s Fever Dream',
+				desc:'Cast a random spell at half the magic cost, with twice the chance of backfiring.',
+				icon:[27,11],
+				costMin:3,
+				costPercent:0.05,
+				win:function()
+				{
+					var spells=[];
+					var selfCost=M.getSpellCost(M.spells['gambler\'s fever dream']);
+					for (var i in M.spells)
+					{if (i!='gambler\'s fever dream' && (M.magic-selfCost)>=M.getSpellCost(M.spells[i])*0.5) spells.push(M.spells[i]);}
+					if (spells.length==0){Game.Popup('<div style="font-size:80%;">No eligible spells!</div>',Game.mouseX,Game.mouseY);return -1;}
+					var spell=choose(spells);
+					var cost=M.getSpellCost(spell)*0.5;
+					setTimeout(function(){
+						var out=M.castSpell(spell,{cost:cost,failChanceMax:0.5,passthrough:true});
+						if (!out)
+						{
+							M.magic+=selfCost;
+							setTimeout(function(){
+								Game.Popup('<div style="font-size:80%;">That\'s too bad!<br>Magic refunded.</div>',Game.mouseX,Game.mouseY);
+							},1500);
+						}
+					},1000);
+					Game.Popup('<div style="font-size:80%;">Casting '+spell.name+'<br>for '+Beautify(cost)+' magic...</div>',Game.mouseX,Game.mouseY);
+				},
+			},
+			'resurrect abomination':{
+				name:'Resurrect Abomination',
+				desc:'Instantly summon a wrinkler if conditions are fulfilled.',
+				failDesc:'Pop one of your wrinklers.',
+				icon:[28,11],
+				costMin:20,
+				costPercent:0.1,
+				win:function()
+				{
+					var out=Game.SpawnWrinkler();
+					if (!out){Game.Popup('<div style="font-size:80%;">Unable to spawn a wrinkler!</div>',Game.mouseX,Game.mouseY);return -1;}
+					Game.Popup('<div style="font-size:80%;">Rise, my precious!</div>',Game.mouseX,Game.mouseY);
+				},
+				fail:function()
+				{
+					var out=Game.PopRandomWrinkler();
+					if (!out){Game.Popup('<div style="font-size:80%;">Backfire!<br>But no wrinkler was harmed.</div>',Game.mouseX,Game.mouseY);return -1;}
+					Game.Popup('<div style="font-size:80%;">Backfire!<br>So long, ugly...</div>',Game.mouseX,Game.mouseY);
+				},
+			},
+			'diminish ineptitude':{
+				name:'Diminish Ineptitude',
+				desc:'Spells backfire 10 times less for the next 5 minutes.',
+				failDesc:'Spells backfire 5 times more for the next 10 minutes.',
+				icon:[29,11],
+				costMin:5,
+				costPercent:0.2,
+				win:function()
+				{
+					Game.killBuff('Magic inept');
+					var buff=Game.gainBuff('magic adept',5*60,10);
+					Game.Popup('<div style="font-size:80%;">Ineptitude diminished!</div>',Game.mouseX,Game.mouseY);
+				},
+				fail:function()
+				{
+					Game.killBuff('Magic adept');
+					var buff=Game.gainBuff('magic inept',10*60,5);
+					Game.Popup('<div style="font-size:80%;">Backfire!<br>Ineptitude magnified!</div>',Game.mouseX,Game.mouseY);
+				},
+			},
+		};
+		M.spellsById=[];var n=0;
+		for (var i in M.spells){M.spells[i].id=n;M.spellsById[n]=M.spells[i];n++;}
+		
+		
+		M.computeMagicM=function()
+		{
+			var towers=Math.max(M.parent.amount,1);
+			var lvl=Math.max(M.parent.level,1);
+			M.magicM=Math.floor(4+Math.pow(towers,0.6)+Math.log((towers+(lvl-1)*10)/15+1)*15);
+			//old formula :
+			/*
+			M.magicM=8+Math.min(M.parent.amount,M.parent.level*5)+Math.ceil(M.parent.amount/10);
+			if (M.magicM>200)
+			{
+				//diminishing returns starting at 200, being 5% as fast by 400
+				var x=M.magicM;
+				var top=x-200;
+				top/=200;
+				var top2=top;
+				top*=(1-top/2);
+				if (top2>=1) top=0.5;
+				top=top*0.95+top2*0.05;
+				top*=200;
+				x=top+200;
+				M.magicM=x;
+			}
+			*/
+			M.magic=Math.min(M.magicM,M.magic);
+		}
+		
+		M.getFailChance=function(spell)
+		{
+			var failChance=0.15;
+			if (Game.hasBuff('Magic adept')) failChance*=0.1;
+			if (Game.hasBuff('Magic inept')) failChance*=5;
+			if (spell.failFunc) failChance=spell.failFunc(failChance);
+			return failChance;
+		}
+		
+		M.castSpell=function(spell,obj)
+		{
+			var obj=obj||{};
+			var out=0;
+			var cost=0;
+			var fail=false;
+			if (typeof obj.cost!=='undefined') cost=obj.cost; else cost=M.getSpellCost(spell);
+			if (M.magic<cost) return false;
+			var failChance=M.getFailChance(spell);
+			if (typeof obj.failChanceSet!=='undefined') failChance=obj.failChanceSet;
+			if (typeof obj.failChanceAdd!=='undefined') failChance+=obj.failChanceAdd;
+			if (typeof obj.failChanceMult!=='undefined') failChance*=obj.failChanceMult;
+			if (typeof obj.failChanceMax!=='undefined') failChance=Math.max(failChance,obj.failChanceMax);
+			Math.seedrandom(Game.seed+'/'+M.spellsCastTotal);
+			if (!spell.fail || Math.random()<(1-failChance)) {out=spell.win();} else {fail=true;out=spell.fail();}
+			Math.seedrandom();
+			if (out!=-1)
+			{
+				if (!spell.passthrough && !obj.passthrough)
+				{
+					M.spellsCast++;
+					M.spellsCastTotal++;
+					if (M.spellsCastTotal>=9) Game.Win('Bibbidi-bobbidi-boo');
+					if (M.spellsCastTotal>=99) Game.Win('I\'m the wiz');
+					if (M.spellsCastTotal>=999) Game.Win('A wizard is you');
+				}
+				
+				M.magic-=cost;
+				M.magic=Math.max(0,M.magic);
+				
+				var rect=l('grimoireSpell'+spell.id).getBoundingClientRect();
+				Game.SparkleAt((rect.left+rect.right)/2,(rect.top+rect.bottom)/2-24);
+				
+				if (fail) PlaySound('snd/spellFail.mp3',0.75); else PlaySound('snd/spell.mp3',0.75);
+				return true;
+			}
+			PlaySound('snd/spellFail.mp3',0.75);
+			return false;
+		}
+		
+		M.getSpellCost=function(spell)
+		{
+			var out=spell.costMin;
+			if (spell.costPercent) out+=M.magicM*spell.costPercent;
+			return Math.floor(out);
+		}
+		M.getSpellCostBreakdown=function(spell)
+		{
+			var str='';
+			if (spell.costPercent) str+=Beautify(spell.costMin)+' magic +'+Beautify(Math.ceil(spell.costPercent*100))+'% of max magic';
+			else str+=Beautify(spell.costMin)+' magic';
+			return str;
+		}
+		
+		M.spellTooltip=function(id)
+		{
+			return function(){
+				var me=M.spellsById[id];
+				me.icon=me.icon||[28,12];
+				var cost=Beautify(M.getSpellCost(me));
+				var costBreakdown=M.getSpellCostBreakdown(me);
+				if (cost!=costBreakdown) costBreakdown=' <small>('+costBreakdown+')</small>'; else costBreakdown='';
+				var backfire=M.getFailChance(me);
+				var str='<div style="padding:8px 4px;min-width:350px;">'+
+				'<div class="icon" style="float:left;margin-left:-8px;margin-top:-8px;background-position:'+(-me.icon[0]*48)+'px '+(-me.icon[1]*48)+'px;"></div>'+
+				'<div class="name">'+me.name+'</div>'+
+				'<div>Magic cost : <b style="color:#'+(cost<=M.magic?'6f6':'f66')+';">'+cost+'</b>'+costBreakdown+'</div>'+
+				(me.fail?('<div><small>Chance to backfire : <b style="color:#f66">'+Math.ceil(100*backfire)+'%</b></small></div>'):'')+
+				'<div class="line"></div><div class="description"><b>Effect :</b> '+me.desc+(me.failDesc?('<div style="height:8px;"></div><b>Backfire :</b> '+me.failDesc):'')+'</div></div>';
+				return str;
+			};
+		}
+		
+		var str='';
+		str+='<style>'+
+		'#grimoireBG{background:url(img/shadedBorders.png),url(img/grimoireBG.png);background-size:100% 100%,auto;position:absolute;left:0px;right:0px;top:0px;bottom:16px;}'+
+		'#grimoireContent{position:relative;box-sizing:border-box;padding:4px 24px;}'+
+		'#grimoireBar{max-width:95%;margin:4px auto;height:16px;}'+
+		'#grimoireBarFull{transform:scale(1,2);transform-origin:50% 0;height:50%;}'+
+		'#grimoireBarText{transform:scale(1,0.8);width:100%;position:absolute;left:0px;top:0px;text-align:center;color:#fff;text-shadow:-1px 1px #000,0px 0px 4px #000,0px 0px 6px #000;margin-top:2px;}'+
+		'#grimoireSpells{text-align:center;width:100%;padding:8px;box-sizing:border-box;}'+
+		'.grimoireIcon{pointer-events:none;margin:2px 6px 0px 6px;width:48px;height:48px;opacity:0.8;position:relative;}'+
+		'.grimoirePrice{pointer-events:none;}'+
+		'.grimoireSpell{box-shadow:4px 4px 4px #000;cursor:pointer;position:relative;color:#f33;opacity:0.8;text-shadow:0px 0px 4px #000,0px 0px 6px #000;font-weight:bold;font-size:12px;display:inline-block;width:60px;height:74px;background:url(img/spellBG.png);}'+
+		'.grimoireSpell.ready{color:rgba(255,255,255,0.8);opacity:1;}'+
+		'.grimoireSpell.ready:hover{color:#fff;}'+
+		'.grimoireSpell:hover{box-shadow:6px 6px 6px 2px #000;z-index:1000000001;top:-1px;}'+
+		'.grimoireSpell:active{top:1px;}'+
+		'.grimoireSpell.ready .grimoireIcon{opacity:1;}'+
+		'.grimoireSpell:hover{background-position:0px -74px;} .grimoireSpell:active{background-position:0px 74px;}'+
+		'.grimoireSpell:nth-child(4n+1){background-position:-60px 0px;} .grimoireSpell:nth-child(4n+1):hover{background-position:-60px -74px;} .grimoireSpell:nth-child(4n+1):active{background-position:-60px 74px;}'+
+		'.grimoireSpell:nth-child(4n+2){background-position:-120px 0px;} .grimoireSpell:nth-child(4n+2):hover{background-position:-120px -74px;} .grimoireSpell:nth-child(4n+2):active{background-position:-120px 74px;}'+
+		'.grimoireSpell:nth-child(4n+3){background-position:-180px 0px;} .grimoireSpell:nth-child(4n+3):hover{background-position:-180px -74px;} .grimoireSpell:nth-child(4n+3):active{background-position:-180px 74px;}'+
+		
+		'.grimoireSpell:hover .grimoireIcon{top:-1px;}'+
+		'.grimoireSpell.ready:hover .grimoireIcon{animation-name:bounce;animation-iteration-count:infinite;animation-duration:0.8s;}'+
+		
+		'#grimoireLumpRefill{cursor:pointer;width:48px;height:48px;position:absolute;left:-40px;top:-17px;transform:scale(0.5);z-index:1000;transition:transform 0.05s;}'+
+		'#grimoireLumpRefill:hover{transform:scale(1);}'+
+		'#grimoireLumpRefill:active{transform:scale(0.4);}'+
+		
+		'#grimoireInfo{text-align:center;font-size:11px;margin-top:12px;color:rgba(255,255,255,0.75);text-shadow:-1px 1px 0px #000;}'+
+		'</style>';
+		str+='<div id="grimoireBG"></div>';
+		str+='<div id="grimoireContent">';
+			str+='<div id="grimoireSpells">';//did you know adding class="shadowFilter" to this cancels the "z-index:1000000001" that displays the selected spell above the tooltip? stacking orders are silly https://philipwalton.com/articles/what-no-one-told-you-about-z-index/
+			for (var i in M.spells)
+			{
+				var me=M.spells[i];
+				var icon=me.icon||[28,12];
+				str+='<div class="grimoireSpell titleFont" id="grimoireSpell'+me.id+'" '+Game.getDynamicTooltip('Game.ObjectsById['+M.parent.id+'].minigame.spellTooltip('+me.id+')','this')+'><div class="usesIcon shadowFilter grimoireIcon" style="background-position:'+(-icon[0]*48)+'px '+(-icon[1]*48)+'px;"></div><div class="grimoirePrice" id="grimoirePrice'+me.id+'">-</div></div>';
+			}
+			str+='</div>';
+			var icon=[29,14];
+			str+='<div id="grimoireBar" class="smallFramed meterContainer"><div '+Game.getTooltip('<div style="padding:8px;width:300px;font-size:11px;text-align:center;">Click to refill <b>100 units</b> of your magic meter<br>for <span class="price lump">1 sugar lump</span>.</div>')+' id="grimoireLumpRefill" class="usesIcon shadowFilter" style="background-position:'+(-icon[0]*48)+'px '+(-icon[1]*48)+'px;"></div><div id="grimoireBarFull" class="meter filling"></div><div id="grimoireBarText" class="titleFont"></div><div '+Game.getTooltip('<div style="padding:8px;width:300px;font-size:11px;text-align:center;">This is your magic meter. Each spell costs magic to use.<div class="line"></div>Your maximum amount of magic varies depending on your amount of <b>Wizard towers</b>, and their level.<div class="line"></div>Magic refills over time. The lower your magic meter, the slower it refills.</div>')+' style="position:absolute;left:0px;top:0px;right:0px;bottom:0px;"></div></div>';
+			str+='<div id="grimoireInfo"></div>';
+		str+='</div>';
+		div.innerHTML=str;
+		M.magicBarL=l('grimoireBar');
+		M.magicBarFullL=l('grimoireBarFull');
+		M.magicBarTextL=l('grimoireBarText');
+		M.lumpRefill=l('grimoireLumpRefill');
+		M.infoL=l('grimoireInfo');
+		for (var i in M.spells)
+		{
+			var me=M.spells[i];
+			AddEvent(l('grimoireSpell'+me.id),'click',function(spell){return function(){PlaySound('snd/tick.mp3');M.castSpell(spell);}}(me));
+		}
+		
+		AddEvent(M.lumpRefill,'click',function(){
+			if (Game.lumps>=1 && M.magic<M.magicM)
+			{
+				M.magic+=100;
+				M.magic=Math.min(M.magic,M.magicM);
+				Game.lumps-=1;
+				PlaySound('snd/pop'+Math.floor(Math.random()*3+1)+'.mp3',0.75);
+			}
+		});
+		
+		M.computeMagicM();
+		M.magic=M.magicM;
+		M.spellsCast=0;
+		M.spellsCastTotal=0;
+		
+		//M.parent.switchMinigame(1);
+	}
+	M.save=function()
+	{
+		//output cannot use ",", ";" or "|"
+		var str=''+
+		parseFloat(M.magic)+' '+
+		parseInt(Math.floor(M.spellsCast))+' '+
+		parseInt(Math.floor(M.spellsCastTotal))
+		;
+		return str;
+	}
+	M.load=function(str)
+	{
+		//interpret str; called after .init
+		//note : not actually called in the Game's load; see "minigameSave" in main.js
+		if (!str) return false;
+		var i=0;
+		var spl=str.split(' ');
+		M.computeMagicM();
+		M.magic=parseFloat(spl[i++]||M.magicM);
+		M.spellsCast=parseInt(spl[i++]||0);
+		M.spellsCastTotal=parseInt(spl[i++]||0);
+	}
+	M.reset=function()
+	{
+		M.computeMagicM();
+		M.magic=M.magicM;
+		M.spellsCast=0;
+	}
+	M.logic=function()
+	{
+		//run each frame
+		if (Game.T%5==0) {M.computeMagicM();}
+		M.magicPS=Math.max(0.002,Math.pow(M.magic/Math.max(M.magicM,100),0.5))*0.002;
+		M.magic+=M.magicPS;
+		M.magic=Math.min(M.magic,M.magicM);
+		if (Game.T%5==0)
+		{
+			for (var i in M.spells)
+			{
+				var me=M.spells[i];
+				var cost=M.getSpellCost(me);
+				l('grimoirePrice'+me.id).innerHTML=Beautify(cost);
+				if (M.magic<cost) l('grimoireSpell'+me.id).className='grimoireSpell titleFont';
+				else l('grimoireSpell'+me.id).className='grimoireSpell titleFont ready';
+			}
+		}
+	}
+	M.draw=function()
+	{
+		//run each draw frame
+		M.magicBarTextL.innerHTML=Math.min(Math.floor(M.magicM),Beautify(M.magic))+'/'+Beautify(Math.floor(M.magicM))+(M.magic<M.magicM?(' (+'+Beautify((M.magicPS||0)*Game.fps,2)+'/s)'):'');
+		M.magicBarFullL.style.width=((M.magic/M.magicM)*100)+'%';
+		M.magicBarL.style.width=(M.magicM*3)+'px';
+		M.infoL.innerHTML='Spells cast : '+Beautify(M.spellsCast)+' (total : '+Beautify(M.spellsCastTotal)+')';
+	}
+	M.init(l('rowSpecial'+M.parent.id));
+}
+var M=0;
+</script>
+<script>
+var M={};
+M.parent=Game.Objects['Temple'];
+M.parent.minigame=M;
+M.launch=function()
+{
+	var M=this;
+	M.name=M.parent.minigameName;
+	M.init=function(div)
+	{
+		//populate div with html and initialize values
+				
+		M.gods={
+			'asceticism':{
+				name:'Holobore, Spirit of Asceticism',
+				icon:[21,18],
+				desc1:'+15% base CpS.',
+				desc2:'+10% base CpS.',
+				desc3:'+5% base CpS.',
+				descAfter:'If a golden cookie is clicked, this spirit is unslotted and all worship swaps will be used up.',
+				quote:'An immortal life spent focusing on the inner self, away from the distractions of material wealth.',
+			},
+			'decadence':{
+				name:'Vomitrax, Spirit of Decadence',
+				icon:[22,18],
+				desc1:'Golden and wrath cookie effect duration +7%, but buildings grant -7% CpS.',
+				desc2:'Golden and wrath cookie effect duration +5%, but buildings grant -5% CpS.',
+				desc3:'Golden and wrath cookie effect duration +2%, but buildings grant -2% CpS.',
+				quote:'This sleazy spirit revels in the lust for quick easy gain and contempt for the value of steady work.',
+			},
+			'ruin':{
+				name:'Godzamok, Spirit of Ruin',
+				icon:[23,18],
+				descBefore:'Selling buildings triggers a buff boosted by how many buildings were sold.',
+				desc1:'Buff boosts clicks by +1% for every building sold for 10 seconds.',
+				desc2:'Buff boosts clicks by +0.5% for every building sold for 10 seconds.',
+				desc3:'Buff boosts clicks by +0.25% for every building sold for 10 seconds.',
+				quote:'The embodiment of natural disasters. An impenetrable motive drives the devastation caused by this spirit.',
+			},
+			'ages':{
+				name:'Cyclius, Spirit of Ages',
+				icon:[24,18],
+				activeDescFunc:function()
+				{
+					var godLvl=Game.hasGod('ages');
+					var mult=1;
+					if (godLvl==1) mult*=0.15*Math.sin((Date.now()/1000/(60*60*3))*Math.PI*2);
+					else if (godLvl==2) mult*=0.15*Math.sin((Date.now()/1000/(60*60*12))*Math.PI*2);
+					else if (godLvl==3) mult*=0.15*Math.sin((Date.now()/1000/(60*60*24))*Math.PI*2);
+					return 'Current bonus : '+(mult<0?'-':'+')+Beautify(Math.abs(mult)*100,2)+'%.';
+				},
+				descBefore:'CpS bonus fluctuating between +15% and -15% over time.',
+				desc1:'Effect cycles over 3 hours.',
+				desc2:'Effect cycles over 12 hours.',
+				desc3:'Effect cycles over 24 hours.',
+				quote:'This spirit knows about everything you\'ll ever do, and enjoys dispensing a harsh judgement.',
+			},
+			'seasons':{
+				name:'Selebrak, Spirit of Festivities',
+				icon:[25,18],
+				descBefore:'Some seasonal effects are boosted.',
+				desc1:'Large boost. Switching seasons is 100% pricier.',
+				desc2:'Medium boost. Switching seasons is 50% pricier.',
+				desc3:'Small boost. Switching seasons is 25% pricier.',
+				quote:'This is the spirit of merry getaways and regretful Monday mornings.',
+			},
+			'creation':{
+				name:'Dotjeiess, Spirit of Creation',
+				icon:[26,18],
+				desc1:'Buildings are 7% cheaper, but heavenly chips have 30% less effect.',
+				desc2:'Buildings are 5% cheaper, but heavenly chips have 20% less effect.',
+				desc3:'Buildings are 2% cheaper, but heavenly chips have 10% less effect.',
+				quote:'All things that be and ever will be were scripted long ago by this spirit\'s inscrutable tendrils.',
+			},
+			'labor':{
+				name:'Muridal, Spirit of Labor',
+				icon:[27,18],
+				desc1:'Clicks are 15% more powerful, but buildings produce 3% less.',
+				desc2:'Clicks are 10% more powerful, but buildings produce 2% less.',
+				desc3:'Clicks are 5% more powerful, but buildings produce 1% less.',
+				quote:'This spirit enjoys a good cheese after a day of hard work.',
+			},
+			'industry':{
+				name:'Jeremy, Spirit of Industry',
+				icon:[28,18],
+				desc1:'Buildings produce 10% more cookies, but golden and wrath cookies appear 10% less.',
+				desc2:'Buildings produce 6% more cookies, but golden and wrath cookies appear 6% less.',
+				desc3:'Buildings produce 3% more cookies, but golden and wrath cookies appear 3% less.',
+				quote:'While this spirit has many regrets, helping you rule the world through constant industrialization is not one of them.',
+			},
+			'mother':{
+				name:'Mokalsium, Mother Spirit',
+				icon:[29,18],
+				desc1:'Milk is 10% more powerful, but golden and wrath cookies appear 15% less.',
+				desc2:'Milk is 5% more powerful, but golden and wrath cookies appear 10% less.',
+				desc3:'Milk is 3% more powerful, but golden and wrath cookies appear 5% less.',
+				quote:'A caring spirit said to contain itself, inwards infinitely.',
+			},
+			'scorn':{
+				name:'Skruuia, Spirit of Scorn',
+				icon:[21,19],
+				descBefore:'All golden cookies are wrath cookies with a greater chance of a negative effect.',
+				desc1:'Wrinklers appear 150% faster and digest 15% more cookies.',
+				desc2:'Wrinklers appear 100% faster and digest 10% more cookies.',
+				desc3:'Wrinklers appear 50% faster and digest 5% more cookies.',
+				quote:'This spirit enjoys poking foul beasts and watching them squirm, but has no love for its own family.',
+			},
+			'order':{
+				name:'Rigidel, Spirit of Order',
+				icon:[22,19],
+				activeDescFunc:function()
+				{
+					if (Game.BuildingsOwned%10==0) return 'Buildings owned : '+Beautify(Game.BuildingsOwned)+'.<br>Effect is active.';
+					else return 'Buildings owned : '+Beautify(Game.BuildingsOwned)+'.<br>Effect is inactive.';
+				},
+				desc1:'Sugar lumps ripen an hour sooner.',
+				desc2:'Sugar lumps ripen 40 minutes sooner.',
+				desc3:'Sugar lumps ripen 20 minutes sooner.',
+				descAfter:'Effect is only active when your total amount of buildings ends with 0.',
+				quote:'You will find that life gets just a little bit sweeter if you can motivate this spirit with tidy numbers and properly-filled tax returns.',
+			},
+		};
+		M.godsById=[];var n=0;
+		for (var i in M.gods){M.gods[i].id=n;M.gods[i].slot=-1;M.godsById[n]=M.gods[i];n++;}
+		
+		
+		M.slot=[];
+		M.slot[0]=-1;//diamond socket
+		M.slot[1]=-1;//ruby socket
+		M.slot[2]=-1;//jade socket
+		
+		M.slotNames=[
+			'Diamond','Ruby','Jade'
+		];
+		
+		M.swaps=3;//swaps left
+		M.swapT=Date.now();//the last time we swapped
+		
+		M.lastSwapT=0;//frames since last swap
+		
+		M.godTooltip=function(id)
+		{
+			return function(){
+				var me=M.godsById[id];
+				me.icon=me.icon||[0,0];
+				var str='<div style="padding:8px 4px;min-width:350px;">'+
+				'<div class="icon" style="float:left;margin-left:-8px;margin-top:-8px;background-position:'+(-me.icon[0]*48)+'px '+(-me.icon[1]*48)+'px;"></div>'+
+				'<div class="name">'+me.name+'</div>'+
+				'<div class="line"></div><div class="description"><div style="margin:6px 0px;font-weight:bold;">Effects :</div>'+
+					(me.descBefore?('<div class="templeEffect">'+me.descBefore+'</div>'):'')+
+					(me.desc1?('<div class="templeEffect templeEffect1"><div class="usesIcon shadowFilter templeGem templeGem1"></div>'+me.desc1+'</div>'):'')+
+					(me.desc2?('<div class="templeEffect templeEffect2"><div class="usesIcon shadowFilter templeGem templeGem2"></div>'+me.desc2+'</div>'):'')+
+					(me.desc3?('<div class="templeEffect templeEffect3"><div class="usesIcon shadowFilter templeGem templeGem3"></div>'+me.desc3+'</div>'):'')+
+					(me.descAfter?('<div class="templeEffect">'+me.descAfter+'</div>'):'')+
+					(me.quote?('<q>'+me.quote+'</q>'):'')+
+				'</div></div>';
+				return str;
+			};
+		}
+		
+		M.slotTooltip=function(id)
+		{
+			return function(){
+				if (M.slot[id]!=-1)
+				{
+					var me=M.godsById[M.slot[id]];
+					me.icon=me.icon||[0,0];
+				}
+				var str='<div style="padding:8px 4px;min-width:350px;">'+
+				(M.slot[id]!=-1?(
+					'<div class="name templeEffect" style="margin-bottom:12px;"><div class="usesIcon shadowFilter templeGem templeGem'+(parseInt(id)+1)+'"></div>'+M.slotNames[id]+' slot</div>'+
+					'<div class="icon" style="float:left;margin-left:-8px;margin-top:-8px;background-position:'+(-me.icon[0]*48)+'px '+(-me.icon[1]*48)+'px;"></div>'+
+					'<div class="name">'+me.name+'</div>'+
+					'<div class="line"></div><div class="description"><div style="margin:6px 0px;font-weight:bold;">Effects :</div>'+
+						(me.activeDescFunc?('<div class="templeEffect templeEffectOn" style="padding:8px 4px;text-align:center;">'+me.activeDescFunc()+'</div>'):'')+
+						(me.descBefore?('<div class="templeEffect">'+me.descBefore+'</div>'):'')+
+						(me.desc1?('<div class="templeEffect templeEffect1'+(me.slot==0?' templeEffectOn':'')+'"><div class="usesIcon shadowFilter templeGem templeGem1"></div>'+me.desc1+'</div>'):'')+
+						(me.desc2?('<div class="templeEffect templeEffect2'+(me.slot==1?' templeEffectOn':'')+'"><div class="usesIcon shadowFilter templeGem templeGem2"></div>'+me.desc2+'</div>'):'')+
+						(me.desc3?('<div class="templeEffect templeEffect3'+(me.slot==2?' templeEffectOn':'')+'"><div class="usesIcon shadowFilter templeGem templeGem3"></div>'+me.desc3+'</div>'):'')+
+						(me.descAfter?('<div class="templeEffect">'+me.descAfter+'</div>'):'')+
+						(me.quote?('<q>'+me.quote+'</q>'):'')+
+					'</div>'
+				):
+				('<div class="name templeEffect"><div class="usesIcon shadowFilter templeGem templeGem'+(parseInt(id)+1)+'"></div>'+M.slotNames[id]+' slot (empty)</div><div class="line"></div><div class="description">'+
+				((M.slotHovered==id && M.dragging)?'Release to assign <b>'+M.dragging.name+'</b> to this slot.':'Drag a spirit onto this slot to assign it.')+
+				'</div>')
+				)+
+				'</div>';
+				return str;
+			};
+		}
+		
+		M.useSwap=function(n)
+		{
+			M.swapT=Date.now();
+			M.swaps-=n;
+			if (M.swaps<0) M.swaps=0;
+		}
+		
+		M.slotGod=function(god,slot)
+		{
+			if (slot==god.slot) return false;
+			if (slot!=-1 && M.slot[slot]!=-1)
+			{
+				M.godsById[M.slot[slot]].slot=god.slot;//swap
+				M.slot[god.slot]=M.slot[slot];
+			}
+			else if (god.slot!=-1) M.slot[god.slot]=-1;
+			if (slot!=-1) M.slot[slot]=god.id;
+			god.slot=slot;
+			Game.recalculateGains=true;
+		}
+		
+		M.dragging=false;
+		M.dragGod=function(what)
+		{
+			M.dragging=what;
+			var div=l('templeGod'+what.id);
+			var box=div.getBoundingClientRect();
+			var box2=l('templeDrag').getBoundingClientRect();
+			div.className='ready templeGod titleFont templeDragged';
+			l('templeDrag').appendChild(div);
+			var x=box.left-box2.left;
+			var y=box.top-box2.top;
+			div.style.transform='translate('+(x)+'px,'+(y)+'px)';
+			l('templeGodPlaceholder'+M.dragging.id).style.display='inline-block';
+			PlaySound('snd/tick.mp3');
+		}
+		M.dropGod=function()
+		{
+			if (!M.dragging) return;
+			var div=l('templeGod'+M.dragging.id);
+			div.className='ready templeGod titleFont';
+			div.style.transform='none';
+			if (M.slotHovered!=-1 && (M.swaps==0 || M.dragging.slot==M.slotHovered))//dropping on a slot but no swaps left, or slot is the same as the original
+			{
+				if (M.dragging.slot!=-1) l('templeSlot'+M.dragging.slot).appendChild(div);
+				else l('templeGodPlaceholder'+(M.dragging.id)).parentNode.insertBefore(div,l('templeGodPlaceholder'+(M.dragging.id)));
+				PlaySound('snd/sell1.mp3',0.75);
+			}
+			else if (M.slotHovered!=-1)//dropping on a slot
+			{
+				M.useSwap(1);
+				M.lastSwapT=0;
+				
+				var prev=M.slot[M.slotHovered];//id of the god already in the slot
+				if (prev!=-1)
+				{
+					prev=M.godsById[prev];
+					var prevDiv=l('templeGod'+prev.id);
+					if (M.dragging.slot!=-1)//swap with god's previous slot
+					{
+						l('templeSlot'+M.dragging.slot).appendChild(prevDiv);
+					}
+					else//swap back to roster
+					{
+						var other=l('templeGodPlaceholder'+(prev.id));
+						other.parentNode.insertBefore(prevDiv,other);
+					}
+				}
+				l('templeSlot'+M.slotHovered).appendChild(div);
+				M.slotGod(M.dragging,M.slotHovered);
+				
+				PlaySound('snd/tick.mp3');
+				PlaySound('snd/spirit.mp3',0.5);
+				
+				var rect=div.getBoundingClientRect();
+				Game.SparkleAt((rect.left+rect.right)/2,(rect.top+rect.bottom)/2-24);
+			}
+			else//dropping back to roster
+			{
+				var other=l('templeGodPlaceholder'+(M.dragging.id));
+				other.parentNode.insertBefore(div,other);
+				other.style.display='none';
+				M.slotGod(M.dragging,-1);
+				PlaySound('snd/sell1.mp3',0.75);
+			}
+			M.dragging=false;
+		}
+		
+		M.slotHovered=-1;
+		M.hoverSlot=function(what)
+		{
+			M.slotHovered=what;
+			if (M.dragging)
+			{
+				if (M.slotHovered==-1) l('templeGodPlaceholder'+M.dragging.id).style.display='inline-block';
+				else l('templeGodPlaceholder'+M.dragging.id).style.display='none';
+				PlaySound('snd/clickb'+Math.floor(Math.random()*7+1)+'.mp3',0.75);
+			}
+		}
+		
+		//external
+		Game.hasGod=function(what)
+		{
+			var god=M.gods[what];
+			for (var i=0;i<3;i++)
+			{
+				if (M.slot[i]==god.id) return (i+1);
+			}
+			return false;
+		}
+		Game.forceUnslotGod=function(god)
+		{
+			var god=M.gods[god];
+			if (god.slot==-1) return false;
+			var div=l('templeGod'+god.id);
+			var other=l('templeGodPlaceholder'+(god.id));
+			other.parentNode.insertBefore(div,other);
+			other.style.display='none';
+			M.slotGod(god,-1);
+			return true;
+		}
+		Game.useSwap=M.useSwap;
+		
+		
+		var str='';
+		str+='<style>'+
+		'#templeBG{background:url(img/shadedBorders.png),url(img/pantheonBG.png);background-size:100% 100%,auto;position:absolute;left:0px;right:0px;top:0px;bottom:16px;}'+
+		'#templeContent{position:relative;box-sizing:border-box;padding:4px 24px;text-align:center;}'+
+		'#templeGods{text-align:center;width:100%;padding:8px;box-sizing:border-box;}'+
+		'.templeIcon{pointer-events:none;margin:12px 6px 0px 6px;width:48px;height:48px;opacity:0.8;position:relative;}'+
+		'.templeSlot .templeIcon{margin:2px 6px 0px 6px;}'+
+		'.templeGod{box-shadow:4px 4px 4px #000;cursor:pointer;position:relative;color:#f33;opacity:0.8;text-shadow:0px 0px 4px #000,0px 0px 6px #000;font-weight:bold;font-size:12px;display:inline-block;width:60px;height:74px;background:url(img/spellBG.png);}'+
+		'.templeGod.ready{color:rgba(255,255,255,0.8);opacity:1;}'+
+		'.templeGod.ready:hover{color:#fff;}'+
+		'.templeGod:hover,.templeDragged{box-shadow:6px 6px 6px 2px #000;z-index:1000000001;top:-1px;}'+
+		'.templeGod:active{top:1px;}'+
+		'.templeGod.ready .templeIcon{opacity:1;}'+
+		'.templeGod:hover{background-position:0px -74px;} .templeGod:active{background-position:0px 74px;}'+
+		'.templeGod1{background-position:-60px 0px;} .templeGod1:hover{background-position:-60px -74px;} .templeGod1:active{background-position:-60px 74px;}'+
+		'.templeGod2{background-position:-120px 0px;} .templeGod2:hover{background-position:-120px -74px;} .templeGod2:active{background-position:-120px 74px;}'+
+		'.templeGod3{background-position:-180px 0px;} .templeGod3:hover{background-position:-180px -74px;} .templeGod3:active{background-position:-180px 74px;}'+
+		
+		'.templeGod:hover .templeIcon{top:-1px;}'+
+		'.templeGod.ready:hover .templeIcon{animation-name:bounce;animation-iteration-count:infinite;animation-duration:0.8s;}'+
+		
+		'.templeGem{z-index:100;width:24px;height:24px;}'+
+		'.templeEffect{font-weight:bold;font-size:11px;position:relative;margin:0px -12px;padding:4px;padding-left:28px;}'+
+		'.description .templeEffect{border-top:1px solid rgba(255,255,255,0.15);background:linear-gradient(to top,rgba(255,255,255,0.1),rgba(255,255,255,0));}'+
+		'.templeEffect .templeGem{position:absolute;left:0px;top:0px;}'+
+		'.templeEffectOn{text-shadow:0px 0px 6px rgba(255,255,255,0.75);color:#fff;}'+
+		'.templeGod .templeGem{position:absolute;left:18px;bottom:8px;pointer-events:none;}'+
+		'.templeGem1{background-position:-1104px -720px;}'+
+		'.templeGem2{background-position:-1128px -720px;}'+
+		'.templeGem3{background-position:-1104px -744px;}'+
+		
+		'.templeSlot .templeGod,.templeSlot .templeGod:hover,.templeSlot .templeGod:active{background:none;}'+
+		
+		'.templeSlotDrag{position:absolute;left:0px;top:0px;right:0px;bottom:0px;background:#999;opacity:0;cursor:pointer;}'+
+		
+		'#templeDrag{position:absolute;left:0px;top:0px;z-index:1000000000000;}'+
+		'.templeGod{transition:transform 0.1s;}'+
+		'#templeDrag .templeGod{position:absolute;left:0px;top:0px;}'+
+		'.templeDragged{pointer-events:none;}'+
+		
+		'.templeGodPlaceholder{background:red;opacity:0;display:none;width:60px;height:74px;}'+
+		
+		'#templeSlots{margin:4px auto;text-align:center;}'+
+		'#templeSlot0{top:-4px;}'+
+		'#templeSlot1{top:0px;}'+
+		'#templeSlot2{top:4px;}'+
+		
+		'#templeLumpRefill{cursor:pointer;width:48px;height:48px;position:absolute;left:-6px;top:-10px;transform:scale(0.5);z-index:1000;transition:transform 0.05s;}'+
+		'#templeLumpRefill:hover{transform:scale(1);}'+
+		'#templeLumpRefill:active{transform:scale(0.4);}'+
+		
+		'#templeInfo{position:relative;display:inline-block;margin:8px auto 0px auto;padding:8px 16px;padding-left:32px;text-align:center;font-size:11px;color:rgba(255,255,255,0.75);text-shadow:-1px 1px 0px #000;background:rgba(0,0,0,0.75);border-radius:16px;}'+
+		'</style>';
+		str+='<div id="templeBG"></div>';
+		str+='<div id="templeContent">';
+			str+='<div id="templeDrag"></div>';
+			str+='<div id="templeSlots">';
+			for (var i in M.slot)
+			{
+				var me=M.slot[i];
+				str+='<div class="ready templeGod templeGod'+(i%4)+' templeSlot titleFont" id="templeSlot'+i+'" '+Game.getDynamicTooltip('Game.ObjectsById['+M.parent.id+'].minigame.slotTooltip('+i+')','this')+'><div class="usesIcon shadowFilter templeGem templeGem'+(parseInt(i)+1)+'"></div></div>';
+			}
+			str+='</div>';
+			var icon=[29,14];
+			str+='<div id="templeInfo"><div '+Game.getTooltip('<div style="padding:8px;width:300px;font-size:11px;text-align:center;">Click to refill all your worship swaps for <span class="price lump">1 sugar lump</span>.</div>')+' id="templeLumpRefill" class="usesIcon shadowFilter" style="background-position:'+(-icon[0]*48)+'px '+(-icon[1]*48)+'px;"></div><div id="templeSwaps" '+Game.getTooltip('<div style="padding:8px;width:350px;font-size:11px;text-align:center;">Each time you slot a spirit, you use up one worship swap.<div class="line"></div>If you have 0 swaps left, you will get one after 16 hours.<br>If you have 1 swap left, the next one will refill after 4 hours.<br>If you have 2 swaps left, the next one will refill after 1 hour.<div class="line"></div>Unslotting a spirit costs no swaps.</div>')+'>-</div></div>';
+			str+='<div id="templeGods">';
+			for (var i in M.gods)
+			{
+				var me=M.gods[i];
+				var icon=me.icon||[0,0];
+				str+='<div class="ready templeGod templeGod'+(me.id%4)+' titleFont" id="templeGod'+me.id+'" '+Game.getDynamicTooltip('Game.ObjectsById['+M.parent.id+'].minigame.godTooltip('+me.id+')','this')+'><div class="usesIcon shadowFilter templeIcon" style="background-position:'+(-icon[0]*48)+'px '+(-icon[1]*48)+'px;"></div><div class="templeSlotDrag" id="templeGodDrag'+me.id+'"></div></div>';
+				str+='<div class="templeGodPlaceholder" id="templeGodPlaceholder'+me.id+'"></div>';
+			}//<div class="usesIcon shadowFilter templeGem templeGem'+(me.id%3+1)+'"></div>
+			str+='</div>';
+		str+='</div>';
+		div.innerHTML=str;
+		M.swapsL=l('templeSwaps');
+		M.lumpRefill=l('templeLumpRefill');
+		
+		for (var i in M.gods)
+		{
+			var me=M.gods[i];
+			AddEvent(l('templeGodDrag'+me.id),'mousedown',function(what){return function(){M.dragGod(what);}}(me));
+			AddEvent(l('templeGodDrag'+me.id),'mouseup',function(what){return function(){M.dropGod(what);}}(me));
+		}
+		for (var i in M.slot)
+		{
+			var me=M.slot[i];
+			AddEvent(l('templeSlot'+i),'mouseover',function(what){return function(){M.hoverSlot(what);}}(i));
+			AddEvent(l('templeSlot'+i),'mouseout',function(what){return function(){M.hoverSlot(-1);}}(i));
+		}
+		
+		AddEvent(document,'mouseup',M.dropGod);
+		
+		AddEvent(M.lumpRefill,'click',function(){
+			if (Game.lumps>=1 && M.swaps<3)
+			{
+				M.swaps=3;
+				M.swapT=Date.now();
+				Game.lumps-=1;
+				PlaySound('snd/pop'+Math.floor(Math.random()*3+1)+'.mp3',0.75);
+			}
+		});
+		
+		//M.parent.switchMinigame(1);
+	}
+	M.save=function()
+	{
+		//output cannot use ",", ";" or "|"
+		var str='';
+		for (var i in M.slot)
+		{str+=parseFloat(M.slot[i])+'/';}
+		str=str.slice(0,-1);
+		str+=' '+parseFloat(M.swaps)+' '+parseFloat(M.swapT);
+		return str;
+	}
+	M.load=function(str)
+	{
+		//interpret str; called after .init
+		//note : not actually called in the Game's load; see "minigameSave" in main.js
+		if (!str) return false;
+		var i=0;
+		var spl=str.split(' ');
+			var bit=spl[i++].split('/')||[];
+			for (var ii in M.slot)
+			{
+				if (parseFloat(bit[ii])!=-1)
+				{
+					var god=M.godsById[parseFloat(bit[ii])];
+					M.slotGod(god,ii);
+					l('templeSlot'+god.slot).appendChild(l('templeGod'+god.id));
+				}
+			}
+		M.swaps=parseFloat(spl[i++]||3);
+		M.swapT=parseFloat(spl[i++]||Date.now());
+	}
+	M.reset=function()
+	{
+		M.swaps=3;
+		M.swapT=Date.now();
+		for (var i in M.slot) {M.slot[i]=-1;}
+		for (var i in M.gods)
+		{
+			var me=M.gods[i];
+			me.slot=-1;
+			var other=l('templeGodPlaceholder'+(me.id));
+			other.parentNode.insertBefore(l('templeGod'+me.id),other);
+			other.style.display='none';
+		}
+	}
+	M.logic=function()
+	{
+		//run each frame
+		var t=1000*60*60;
+		if (M.swaps==0) t=1000*60*60*16;
+		else if (M.swaps==1) t=1000*60*60*4;
+		var t2=M.swapT+t-Date.now();
+		if (t2<=0 && M.swaps<3) {M.swaps++;M.swapT=Date.now();}
+		M.lastSwapT++;
+	}
+	M.draw=function()
+	{
+		//run each draw frame
+		if (M.dragging)
+		{
+			var box=l('templeDrag').getBoundingClientRect();
+			var x=Game.mouseX-box.left-60/2;
+			var y=Game.mouseY-box.top;
+			if (M.slotHovered!=-1)//snap to slots
+			{
+				var box2=l('templeSlot'+M.slotHovered).getBoundingClientRect();
+				x=box2.left-box.left;
+				y=box2.top-box.top;
+			}
+			l('templeGod'+M.dragging.id).style.transform='translate('+(x)+'px,'+(y)+'px)';
+		}
+		var t=1000*60*60;
+		if (M.swaps==0) t=1000*60*60*16;
+		else if (M.swaps==1) t=1000*60*60*4;
+		var t2=M.swapT+t-Date.now();
+		M.swapsL.innerHTML='Worship swaps : <span class="titleFont" style="color:'+(M.swaps>0?'#fff':'#c00')+';">'+M.swaps+'/'+(3)+'</span>'+((M.swaps<3)?' (next in '+Game.sayTime((t2/1000+1)*Game.fps,-1)+')':'');
+	}
+	M.init(l('rowSpecial'+M.parent.id));
+}
+var M=0;
+</script>
+
+	<script>var M={};
 M.parent=Game.Objects['Farm'];
 M.parent.minigame=M;
 M.launch=function()
