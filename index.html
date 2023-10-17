@@ -3188,7 +3188,9 @@ Feel free to alter this code to your liking, but please do not re-host it, do no
 <link rel="shortcut icon" href="img/favicon.ico" />
 <!--<link href="https://fonts.googleapis.com/css?family=Kavoon&subset=latin,latin-ext" rel="stylesheet" type="text/css">-->
 <link href='https://fonts.googleapis.com/css?family=Merriweather:900&subset=latin,latin-ext' rel='stylesheet' type='text/css'>
-<script src="showads.js"></script><!-- this just detects adblockers so we can adjust the layout and play nice -->
+<script>//this lets us detect adblockers so we can adjust the layout in case ads aren't shown ! (we're not using this for anything weird, promise !)
+//this works because an adblocker will usually block this file from being embedded at all
+var showAds=false;</script><!-- this just detects adblockers so we can adjust the layout and play nice -->
 <script>/**
 *
 *  Base64 encode / decode
